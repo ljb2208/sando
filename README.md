@@ -2,7 +2,9 @@
 
 If you like this project, please consider starring ⭐ the repo!
 
-**Submitted to the IEEE Transactions on Robotics (T-RO)**
+**Accepted to the IEEE Transactions on Robotics (T-RO)**
+
+📰 **Featured on MIT News:** [Planning system ensures a robot's flight path will remain collision-free](https://news.mit.edu/2026/planning-system-ensures-robots-flight-path-will-remain-collision-free-1007)
 
 <table>
 <tr>
