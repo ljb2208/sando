@@ -26,7 +26,7 @@
 #include <std_msgs/msg/color_rgba.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
-#include <sando/gurobi_solver.hpp>
+#include <sando/solver.hpp>
 #include <sando/utils.hpp>
 #include "hgp/hgp_manager.hpp"
 #include "hgp/termcolor.hpp"
@@ -667,7 +667,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
     // Solver control
     declare_parameter<double>("assumed_last_replan_time_sec", 0.05);
 
-    // Minimal subset of sando.yaml that SolverGurobi needs
+    // Minimal subset of sando.yaml that SandoSolver needs
     declare_parameter<int>("num_N", 6);
     declare_parameter<double>("dc", 0.01);
 
@@ -758,7 +758,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
     traj_dump_root_dir_ = get_parameter("traj_dump_root_dir").as_string();
     traj_dump_dt_ = get_parameter("traj_dump_dt").as_double();
 
-    // Fill parameters struct for SolverGurobi
+    // Fill parameters struct for SandoSolver
     par_.dc = get_parameter("dc").as_double();
 
     par_.x_min = get_parameter("x_min").as_double();
@@ -909,7 +909,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
             num_cores, max_num_factors, grb_threads_per_solver);
 
         for (size_t i = 0; i < max_num_factors; ++i) {
-          auto s = std::make_shared<SolverGurobi>();
+          auto s = std::make_shared<SandoSolver>();
           s->setPlannerName(planner_name_);
           if (!use_single_threaded_) s->setGurobiThreads(grb_threads_per_solver);
           s->initializeSolver(par_);
@@ -1823,7 +1823,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
   size_t play_idx_{0};
 
   std::vector<double> factors_;
-  std::vector<std::shared_ptr<SolverGurobi>> whole_traj_solver_ptrs_;
+  std::vector<std::shared_ptr<SandoSolver>> whole_traj_solver_ptrs_;
 
   bool use_dynamic_factor_{false};
   double dynamic_factor_k_radius_{0.4};

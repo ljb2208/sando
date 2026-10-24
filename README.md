@@ -247,7 +247,7 @@ cd sando
 ```
 
 This automated script will:
-- Install ROS 2 Humble (if not already installed)
+- Install ROS 2 Jazzy (if not already installed; requires Ubuntu 24.04)
 - Install all system dependencies and Gurobi
 - Build Livox-SDK2 and livox_ros_driver2
 - Build SANDO and all ROS dependencies
@@ -270,6 +270,8 @@ grbgetkey YOUR_LICENSE_KEY   # saves license to ~/gurobi.lic
 ```
 
 > **Note:** The license is only needed to **run** SANDO, not to build it.
+
+> **Solver backend:** SANDO builds with the HiGHS + SHOT solver (`SolverHighsShot`) by default, which requires [HiGHS](https://github.com/ERGO-Code/HiGHS) and [SHOT](https://github.com/coin-or/SHOT) (built with HiGHS support) to be installed. To use Gurobi (`SolverGurobi`) instead, configure with `-DSANDO_USE_GUROBI=ON`, e.g. `colcon build --packages-select sando --cmake-args -DSANDO_USE_GUROBI=ON`. The setup script and Docker image install Gurobi and pass this option.
 
 **4. Run Simulations**
 

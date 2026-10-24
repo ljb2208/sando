@@ -24,7 +24,7 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include "hgp/hgp_manager.hpp"
-#include "sando/gurobi_solver.hpp"
+#include "sando/solver.hpp"
 #include "sando/sando_type.hpp"
 #include "sando/utils.hpp"
 #include <decomp_ros_msgs/msg/polyhedron_array.hpp>
@@ -367,7 +367,7 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
     cycle_period_sec_ = get_parameter("cycle_period_sec").as_double();
     fixed_layer_ = get_parameter("fixed_layer").as_int();
 
-    // Build parameters struct used by both HGPManager and SolverGurobi
+    // Build parameters struct used by both HGPManager and SandoSolver
     par_.num_N = N_local_;
     par_.dc = dc_;
 
@@ -551,7 +551,7 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
 
   void solveTrajectory_() {
     // Solver setup
-    solver_ = std::make_shared<SolverGurobi>();
+    solver_ = std::make_shared<SandoSolver>();
     solver_->setPlannerName("SANDO");
     solver_->initializeSolver(par_);
     solver_->setT0(0.0);
@@ -780,7 +780,7 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
   // Core structs
   Parameters par_;
   HGPManager hgp_;
-  std::shared_ptr<SolverGurobi> solver_;
+  std::shared_ptr<SandoSolver> solver_;
 
   // Inputs
   vec_Vecf<3> obst_pos_;   // dynamic obstacle centers

@@ -24,7 +24,7 @@
 #include <decomp_util/ellipsoid_decomp.h>
 #include <decomp_util/seed_decomp.h>
 #include <decomp_rviz_plugins/data_ros_utils.hpp>
-#include <sando/gurobi_solver.hpp>
+#include <sando/solver.hpp>
 #include <sando/utils.hpp>
 #include "hgp/hgp_manager.hpp"
 #include "hgp/termcolor.hpp"
@@ -342,7 +342,7 @@ class SANDO {
       double A_time,
       double& gurobi_computation_time,
       double& cvx_decomp_time,
-      std::shared_ptr<SolverGurobi>& whole_traj_solver_ptr,
+      std::shared_ptr<SandoSolver>& whole_traj_solver_ptr,
       double factor,
       double initial_dt,
       const vec_Vecf<3>& obst_pos,
@@ -492,7 +492,7 @@ class SANDO {
   // Parameters
   Parameters par_;          // Parameters of the planner
   HGPManager hgp_manager_;  // HGP Manager
-  std::vector<std::shared_ptr<SolverGurobi>>
+  std::vector<std::shared_ptr<SandoSolver>>
       whole_traj_solver_ptrs_;                   // L-BFGS solver pointer for the whole trajectory
   std::vector<std::shared_ptr<DynTraj>> trajs_;  // Dynamic trajectory
   Eigen::Vector3d v_max_3d_;                     // Maximum velocity

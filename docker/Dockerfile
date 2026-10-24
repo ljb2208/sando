@@ -41,6 +41,37 @@ ENV PATH="${PATH}:${GUROBI_HOME}/bin"
 ENV LD_LIBRARY_PATH="${GUROBI_HOME}/lib"
 COPY gurobi.lic /opt/gurobi1103/
 
+# Parallel build jobs, limited by default to avoid OOM kills (override with --build-arg BUILD_JOBS=N)
+ARG BUILD_JOBS=2
+
+# HiGHS (LP/QP/MIP solver) and SHOT (convex MINLP solver, with HiGHS as its MIP solver), built from
+# their GitHub sources and installed to /usr/local. These back SANDO's default trajectory solver
+# (SolverHighsShot). SHOT is built against this HiGHS so that SANDO and SHOT share one libhighs.
+# Override the pinned versions with --build-arg HIGHS_VERSION=<tag> / --build-arg SHOT_COMMIT=<sha>.
+ARG HIGHS_VERSION=v1.15.1
+ARG SHOT_COMMIT=d9db115573f424e94b600ad59f704701e7ceded2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake pkg-config coinor-libipopt-dev && \
+    rm -rf /var/lib/apt/lists/*
+RUN git clone --branch ${HIGHS_VERSION} --depth 1 https://github.com/ERGO-Code/HiGHS.git /tmp/HiGHS && \
+    cmake -S /tmp/HiGHS -B /tmp/HiGHS/build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && \
+    cmake --build /tmp/HiGHS/build --parallel ${BUILD_JOBS} && \
+    cmake --install /tmp/HiGHS/build && \
+    rm -rf /tmp/HiGHS
+RUN mkdir /tmp/SHOT && cd /tmp/SHOT && \
+    git init -q && git remote add origin https://github.com/coin-or/SHOT.git && \
+    git fetch -q --depth 1 origin ${SHOT_COMMIT} && git checkout -q FETCH_HEAD && \
+    git submodule update --init --depth 1 ThirdParty/spdlog ThirdParty/CppAD ThirdParty/eigen && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DHAS_HIGHS=ON -DUSE_EXTERNAL_HIGHS=ON -DHIGHS_EXTERNAL_DIR=/usr/local -DHAS_IPOPT=ON \
+          -DHAS_CBC=OFF -DHAS_CPLEX=OFF -DHAS_GUROBI=OFF -DHAS_GAMS=OFF \
+          -DBUILD_DOCUMENTATION=OFF && \
+    cmake --build build --parallel ${BUILD_JOBS} && \
+    cmake --install build && \
+    ldconfig && \
+    rm -rf /tmp/SHOT
+
 # Clone SANDO from GitHub at a pinned tag (override with `make build SANDO_TAG=<tag>`).
 # The default tracks `main`; tag a release and update SANDO_TAG here when publishing.
 ENV SANDO_WS=/root/sando_ws
@@ -83,7 +114,8 @@ RUN source /opt/ros/humble/setup.bash && \
 # Parallelism is limited to avoid OOM kills on template-heavy files like
 # gazebo_ros_camera.cpp (which can use 3-4 GB RAM per compilation unit).
 # Override with --build-arg BUILD_JOBS=N if you have more RAM available.
-ARG BUILD_JOBS=2
+# SANDO uses HiGHS + SHOT by default; use --build-arg SANDO_USE_GUROBI=ON for Gurobi instead.
+ARG SANDO_USE_GUROBI=OFF
 ENV MAKEFLAGS="-j${BUILD_JOBS}"
 WORKDIR ${SANDO_WS}
 RUN source /opt/ros/humble/setup.bash && \
@@ -94,7 +126,7 @@ RUN source /opt/ros/humble/setup.bash && \
     source ${SANDO_WS}/install/setup.bash && \
     colcon build --packages-ignore ros2_livox_simulation \
                  --parallel-workers ${BUILD_JOBS} \
-                 --cmake-args -DCMAKE_BUILD_TYPE=Release
+                 --cmake-args -DCMAKE_BUILD_TYPE=Release -DSANDO_USE_GUROBI=${SANDO_USE_GUROBI}
 RUN source /opt/ros/humble/setup.bash && \
     source ${SANDO_WS}/install/setup.bash && \
     source ${LIVOX_WS}/install/setup.bash && \
