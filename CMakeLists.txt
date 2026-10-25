@@ -95,7 +95,9 @@ else()
   set_target_properties(sando_highs_shot_solver PROPERTIES POSITION_INDEPENDENT_CODE ON)
   # The public headers do not include HiGHS or SHOT headers, so they stay private
   target_link_libraries(sando_highs_shot_solver PRIVATE highs::highs SHOT::SHOTSolver)
-  ament_target_dependencies(sando_highs_shot_solver Eigen3 decomp_util decomp_rviz_plugins)
+  # PUBLIC: use the keyword signature, like the target_link_libraries() call above (CMake does not
+  # allow mixing signatures), and the public headers include these packages' headers
+  ament_target_dependencies(sando_highs_shot_solver PUBLIC Eigen3 decomp_util decomp_rviz_plugins)
   # The modeling layer represents infinite bounds with IEEE infinity, which -ffast-math assumes away
   set_source_files_properties(src/sando/highs_shot_model.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
   set(SANDO_SOLVER_SOURCES "")

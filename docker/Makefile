@@ -42,6 +42,13 @@ else
 TAG_ARG =
 endif
 
+# Repository the Dockerfile clones SANDO from (must match the Dockerfile's SANDO_REPO default).
+SANDO_REPO ?= https://github.com/ljb2208/sando.git
+# Commit SHA of the branch/tag being cloned, passed as DUMMY so that Docker re-clones SANDO (instead
+# of reusing a cached, stale checkout) whenever new commits have been pushed.
+SANDO_COMMIT := $(shell git ls-remote $(SANDO_REPO) $(or $(SANDO_TAG),main) 2>/dev/null | head -n 1 | cut -f 1)
+TAG_ARG += --build-arg SANDO_REPO=$(SANDO_REPO) --build-arg DUMMY=$(or $(SANDO_COMMIT),unknown)
+
 build:
 	docker build $(PLATFORM_FLAG) -t sando \
 		--build-arg BUILD_JOBS=$(BUILD_JOBS) $(TAG_ARG) .

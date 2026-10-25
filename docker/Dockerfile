@@ -78,10 +78,13 @@ ENV SANDO_WS=/root/sando_ws
 ENV LIVOX_WS=/root/livox_ws
 RUN mkdir -p ${SANDO_WS}/src
 WORKDIR ${SANDO_WS}/src
+# DUMMY busts the cache of the clone below: `make build` sets it to the commit SHA of SANDO_TAG, so
+# the clone (and everything after it) is redone exactly when new commits are pushed.
 ARG DUMMY=unknown
 #ARG SANDO_TAG=v0.0.3
 ARG SANDO_TAG=main
-RUN DUMMY=${DUMMY} git clone --branch ${SANDO_TAG} --depth 1 https://github.com/ljb2208/sando.git && \
+ARG SANDO_REPO=https://github.com/ljb2208/sando.git
+RUN DUMMY=${DUMMY} git clone --branch ${SANDO_TAG} --depth 1 ${SANDO_REPO} sando && \
     cd sando && \
     git submodule update --init --recursive
 
