@@ -17,7 +17,8 @@
 // big-M constants computed from feasibility-based bound tightening on the linear constraints.
 // After SHOT solves a mixed-integer problem, the binaries are fixed and the continuous problem is
 // solved again (HiGHS for QPs), so the returned solution is not affected by big-M round-off.
-// No third-party headers are included here; HiGHS and SHOT are only used in the .cpp file.
+// No third-party headers are included here. HiGHS is used in highs_shot_model.cpp; SHOT only in
+// the backend plugin libsando_shot_backend.so, loaded at runtime (see highs_shot_assembled.hpp).
 
 #pragma once
 
@@ -29,6 +30,10 @@
 #include <vector>
 
 namespace hs {
+
+namespace detail {
+struct AssembledModel;
+}
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
@@ -298,7 +303,7 @@ class Model {
   };
 
   // A model assembled for the backends, in terms of the active (column-indexed) variables.
-  struct Assembled;
+  using Assembled = detail::AssembledModel;
 
   template <typename T>
   static int allocateSlot(std::vector<T>& slots, std::vector<int>& free_slots, T&& data);

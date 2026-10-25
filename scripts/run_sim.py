@@ -1780,7 +1780,7 @@ def main():
         print(
             f"[INFO] Obstacles: {num_obs} total ({num_dyn} dynamic, {num_stat} static)"
         )
-        print("[INFO] Use RViz '2D Nav Goal' to send goals")
+        print("[INFO] Use RViz '2D Goal Pose' to send goals")
     elif args.mode == "gazebo-dynamic":
         use_rviz = args.rviz and not args.no_rviz
         use_gazebo_gui = args.gazebo_gui and not args.no_gazebo_gui

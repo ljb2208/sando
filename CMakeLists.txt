@@ -91,10 +91,24 @@ if(SANDO_USE_GUROBI)
   set(SANDO_SOLVER_LIBRARIES ${GUROBI_LIBRARIES})
 else()
   message(STATUS "Trajectory solver: HiGHS + SHOT (SolverHighsShot)")
+  # SHOT is used only through a plugin loaded at runtime with RTLD_LOCAL | RTLD_DEEPBIND, never
+  # linked: SHOT exports its own copy of spdlog, which ROS' logging would otherwise bind to,
+  # aborting the nodes in rclcpp::init (see src/sando/highs_shot_assembled.hpp)
+  add_library(sando_shot_backend MODULE src/sando/highs_shot_backend.cpp)
+  target_link_libraries(sando_shot_backend PRIVATE highs::highs SHOT::SHOTSolver)
+  set_target_properties(sando_shot_backend PROPERTIES
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  target_compile_options(sando_shot_backend PRIVATE -fno-fast-math)
+  install(TARGETS sando_shot_backend LIBRARY DESTINATION lib)
+
   add_library(sando_highs_shot_solver STATIC src/sando/highs_shot_solver.cpp src/sando/highs_shot_model.cpp)
   set_target_properties(sando_highs_shot_solver PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  # The public headers do not include HiGHS or SHOT headers, so they stay private
-  target_link_libraries(sando_highs_shot_solver PRIVATE highs::highs SHOT::SHOTSolver)
+  # The public headers do not include HiGHS headers, so it stays private
+  target_link_libraries(sando_highs_shot_solver PRIVATE highs::highs ${CMAKE_DL_LIBS})
+  # Where the solver looks for the SHOT plugin (also $SANDO_SHOT_BACKEND and the library path)
+  set_source_files_properties(src/sando/highs_shot_model.cpp PROPERTIES COMPILE_DEFINITIONS
+    "SANDO_SHOT_BACKEND_PATH=\"${CMAKE_INSTALL_PREFIX}/lib/libsando_shot_backend.so\"")
+  add_dependencies(sando_highs_shot_solver sando_shot_backend)
   # PUBLIC: use the keyword signature, like the target_link_libraries() call above (CMake does not
   # allow mixing signatures), and the public headers include these packages' headers
   ament_target_dependencies(sando_highs_shot_solver PUBLIC Eigen3 decomp_util decomp_rviz_plugins)

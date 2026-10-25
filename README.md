@@ -117,7 +117,7 @@ make build BUILD_JOBS=1    # if you hit "killed cc1plus" or OOM errors
 **5. Run Simulations**
 
 ```bash
-# Interactive simulation (click goals in RViz with "2D Nav Goal" or hit "g")
+# Interactive simulation (click goals in RViz with "2D Goal Pose" or hit "g")
 make run-interactive
 
 # Auto-goal demo
@@ -214,7 +214,7 @@ cd sando/docker
 make run-mac-interactive
 ```
 
-Then open **http://localhost:8080** in your browser. RViz will appear; use "2D Nav Goal" (or hit `g`) to send goals.
+Then open **http://localhost:8080** in your browser. RViz will appear; use "2D Goal Pose" (or hit `g`) to send goals.
 
 <details>
 <summary><b>Troubleshooting</b></summary>

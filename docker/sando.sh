@@ -5,6 +5,7 @@
 #   make run-demo SCENARIO=static_easy
 #   make run-interactive
 #   make run-interactive NUM_OBSTACLES=100
+#   make run-demo SCENARIO=static_easy GAZEBO_GUI=true   (also show the Gazebo window)
 
 SANDO_WS="${SANDO_WS:-/root/sando_ws}"
 
@@ -37,6 +38,13 @@ MODE="${MODE:-demo}"
 SCENARIO="${SCENARIO:-static_easy}"
 SETUP_BASH="${SANDO_WS}/install/setup.bash"
 
+# GAZEBO_GUI=true also opens the Gazebo client window (gzclient). It applies to the scenarios that
+# run Gazebo (static_* and unknown_dynamic_*); dynamic_* and interactive mode are RViz-only.
+GAZEBO_GUI_ARG=""
+if [ "${GAZEBO_GUI}" = "true" ]; then
+    GAZEBO_GUI_ARG="--gazebo-gui"
+fi
+
 if [ "$MODE" = "demo" ]; then
     case "$SCENARIO" in
         static_easy|static_medium|static_hard)
@@ -56,13 +64,16 @@ if [ "$MODE" = "demo" ]; then
             exit 1 ;;
     esac
     echo "[SANDO] Demo: $TYPE $DIFFICULTY"
-    python3 src/sando/scripts/run_sim.py --mode "$TYPE" --difficulty "$DIFFICULTY" -s "$SETUP_BASH"
+    if [ -n "$GAZEBO_GUI_ARG" ] && [ "$TYPE" = "dynamic" ]; then
+        echo "[SANDO] Note: dynamic_* scenarios run without Gazebo (RViz only); GAZEBO_GUI has no effect"
+    fi
+    python3 src/sando/scripts/run_sim.py --mode "$TYPE" --difficulty "$DIFFICULTY" -s "$SETUP_BASH" $GAZEBO_GUI_ARG
 
 elif [ "$MODE" = "interactive" ]; then
     NUM_OBSTACLES="${NUM_OBSTACLES:-50}"
     DYNAMIC_RATIO="${DYNAMIC_RATIO:-0.65}"
     echo "[SANDO] Interactive mode: $NUM_OBSTACLES obstacles, ${DYNAMIC_RATIO} dynamic ratio"
-    echo "[SANDO] Use RViz '2D Nav Goal' to send goals by clicking"
+    echo "[SANDO] Use RViz '2D Goal Pose' (toolbar, or press g) to send goals by clicking"
     python3 src/sando/scripts/run_sim.py \
         --mode interactive \
         --num-obstacles "$NUM_OBSTACLES" \

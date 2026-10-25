@@ -65,8 +65,12 @@ build-no-cache:
 
 SCENARIO ?= static_easy
 
+# GAZEBO_GUI=true also opens the Gazebo window (static_* and unknown_dynamic_* scenarios only;
+# dynamic_* scenarios and run-interactive are RViz-only)
+GAZEBO_GUI ?= false
+
 run-demo:
-	$(DOCKER_FLAGS) -e MODE=demo -e SCENARIO=$(SCENARIO) sando
+	$(DOCKER_FLAGS) -e MODE=demo -e SCENARIO=$(SCENARIO) -e GAZEBO_GUI=$(GAZEBO_GUI) sando
 
 # Convenience aliases
 run-static-easy:
