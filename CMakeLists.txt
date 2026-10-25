@@ -46,16 +46,24 @@ find_package(std_srvs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
-# Gurobi
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
-find_package(GUROBI REQUIRED)
+# Trajectory optimization backend: SolverHighsShot (HiGHS + SHOT) by default, or SolverGurobi with
+#   colcon build --cmake-args -DSANDO_USE_GUROBI=ON
+option(SANDO_USE_GUROBI "Use Gurobi (SolverGurobi) instead of HiGHS + SHOT (SolverHighsShot)" OFF)
 
-# check if gurobi is found
-if(GUROBI_FOUND)
-message(STATUS "GUROBI FOUND")
-else(GUROBI_FOUND)
-message(FATAL_ERROR "GUROBI NOT FOUND!")
-endif(GUROBI_FOUND)
+if(SANDO_USE_GUROBI)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
+  find_package(GUROBI REQUIRED)
+
+  # check if gurobi is found
+  if(GUROBI_FOUND)
+  message(STATUS "GUROBI FOUND")
+  else(GUROBI_FOUND)
+  message(FATAL_ERROR "GUROBI NOT FOUND!")
+  endif(GUROBI_FOUND)
+else()
+  find_package(highs REQUIRED)
+  find_package(SHOT REQUIRED)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
 
@@ -72,13 +80,31 @@ include_directories(${EIGEN3_INCLUDE_DIR} ${PCL_INCLUDE_DIRS} ${DECOMP_UTIL_INCL
 link_directories(${PCL_LIBRARY_DIRS} ${BOOST_LIBRARY_DIRS} ${GAZEBO_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-# set up for gurobi
-FILE(GLOB GurobiSOFiles $ENV{GUROBI_HOME}/lib/libgurobi*[0-9].so) #files that are start with libgurobi and end with number.so
-set(GUROBI_LIBRARIES "$ENV{GUROBI_HOME}/lib/libgurobi_c++.a;${GurobiSOFiles};$ENV{GUROBI_HOME}/lib/" )
+if(SANDO_USE_GUROBI)
+  message(STATUS "Trajectory solver: Gurobi (SolverGurobi)")
+  # set up for gurobi
+  FILE(GLOB GurobiSOFiles $ENV{GUROBI_HOME}/lib/libgurobi*[0-9].so) #files that are start with libgurobi and end with number.so
+  set(GUROBI_LIBRARIES "$ENV{GUROBI_HOME}/lib/libgurobi_c++.a;${GurobiSOFiles};$ENV{GUROBI_HOME}/lib/" )
+  # Selects SolverGurobi in include/sando/solver.hpp
+  add_definitions(-DSANDO_USE_GUROBI)
+  set(SANDO_SOLVER_SOURCES src/sando/gurobi_solver.cpp)
+  set(SANDO_SOLVER_LIBRARIES ${GUROBI_LIBRARIES})
+else()
+  message(STATUS "Trajectory solver: HiGHS + SHOT (SolverHighsShot)")
+  add_library(sando_highs_shot_solver STATIC src/sando/highs_shot_solver.cpp src/sando/highs_shot_model.cpp)
+  set_target_properties(sando_highs_shot_solver PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  # The public headers do not include HiGHS or SHOT headers, so they stay private
+  target_link_libraries(sando_highs_shot_solver PRIVATE highs::highs SHOT::SHOTSolver)
+  ament_target_dependencies(sando_highs_shot_solver Eigen3 decomp_util decomp_rviz_plugins)
+  # The modeling layer represents infinite bounds with IEEE infinity, which -ffast-math assumes away
+  set_source_files_properties(src/sando/highs_shot_model.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
+  set(SANDO_SOLVER_SOURCES "")
+  set(SANDO_SOLVER_LIBRARIES sando_highs_shot_solver)
+endif()
 
 # add executables
-add_executable(sando src/sando/sando_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp src/sando/gurobi_solver.cpp)
-target_link_libraries(sando ${GUROBI_LIBRARIES} ${PCL_LIBRARIES})
+add_executable(sando src/sando/sando_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+target_link_libraries(sando ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(sando rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
 # Add the fake_sim executable
@@ -146,19 +172,19 @@ ament_target_dependencies(dynamic_forest_node
 # For benchmark SFC generation
 add_executable(corridor_generator_node src/sando/corridor_generator_node.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp
 )
-target_link_libraries(corridor_generator_node ${GUROBI_LIBRARIES} ${PCL_LIBRARIES})
+target_link_libraries(corridor_generator_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(corridor_generator_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(local_traj_benchmark_node src/sando/local_traj_benchmark.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp src/sando/gurobi_solver.cpp)
-target_link_libraries(local_traj_benchmark_node ${GUROBI_LIBRARIES} ${PCL_LIBRARIES})
+add_executable(local_traj_benchmark_node src/sando/local_traj_benchmark.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+target_link_libraries(local_traj_benchmark_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(local_traj_benchmark_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(visualize_local_trajs_node src/sando/visualize_local_trajs.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp src/sando/gurobi_solver.cpp)
-target_link_libraries(visualize_local_trajs_node ${GUROBI_LIBRARIES} ${PCL_LIBRARIES})
+add_executable(visualize_local_trajs_node src/sando/visualize_local_trajs.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+target_link_libraries(visualize_local_trajs_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(visualize_local_trajs_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(temporal_layered_corridor_test_node src/sando/temporal_layered_corridor_test_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp src/sando/gurobi_solver.cpp)
-target_link_libraries(temporal_layered_corridor_test_node ${GUROBI_LIBRARIES} ${PCL_LIBRARIES})
+add_executable(temporal_layered_corridor_test_node src/sando/temporal_layered_corridor_test_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+target_link_libraries(temporal_layered_corridor_test_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(temporal_layered_corridor_test_node rclcpp visualization_msgs std_msgs geometry_msgs Eigen3 decomp_util decomp_ros_msgs decomp_rviz_plugins decomp_test_node tf2 tf2_ros tf2_geometry_msgs tf2_eigen std_srvs pcl_ros pcl_conversions sensor_msgs dynus_interfaces)
 
 # Benchmark analysis tool (C++ port of analyze_dynamic_benchmark.py)

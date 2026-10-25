@@ -39,7 +39,7 @@ RUN wget -q https://packages.gurobi.com/11.0/gurobi11.0.3_linux64.tar.gz -P /tmp
 ENV GUROBI_HOME="/opt/gurobi1103/linux64"
 ENV PATH="${PATH}:${GUROBI_HOME}/bin"
 ENV LD_LIBRARY_PATH="${GUROBI_HOME}/lib"
-COPY gurobi.lic /opt/gurobi1103/
+# COPY gurobi.lic /opt/gurobi1103/
 
 # Parallel build jobs, limited by default to avoid OOM kills (override with --build-arg BUILD_JOBS=N)
 ARG BUILD_JOBS=2
@@ -79,8 +79,9 @@ ENV LIVOX_WS=/root/livox_ws
 RUN mkdir -p ${SANDO_WS}/src
 WORKDIR ${SANDO_WS}/src
 ARG DUMMY=unknown
-ARG SANDO_TAG=v0.0.3
-RUN DUMMY=${DUMMY} git clone --branch ${SANDO_TAG} --depth 1 https://github.com/mit-acl/sando.git && \
+#ARG SANDO_TAG=v0.0.3
+ARG SANDO_TAG=main
+RUN DUMMY=${DUMMY} git clone --branch ${SANDO_TAG} --depth 1 https://github.com/ljb2208/sando.git && \
     cd sando && \
     git submodule update --init --recursive
 
