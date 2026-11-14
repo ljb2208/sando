@@ -668,6 +668,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
     declare_parameter<double>("assumed_last_replan_time_sec", 0.05);
 
     // Minimal subset of sando.yaml that SandoSolver needs
+    declare_parameter<std::string>("solver", "auto");  // auto, highs_shot or gurobi
     declare_parameter<int>("num_N", 6);
     declare_parameter<double>("dc", 0.01);
 
@@ -759,6 +760,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
     traj_dump_dt_ = get_parameter("traj_dump_dt").as_double();
 
     // Fill parameters struct for SandoSolver
+    par_.solver = get_parameter("solver").as_string();
     par_.dc = get_parameter("dc").as_double();
 
     par_.x_min = get_parameter("x_min").as_double();
@@ -909,7 +911,7 @@ class LocalTrajBenchmarkNode final : public rclcpp::Node {
             num_cores, max_num_factors, grb_threads_per_solver);
 
         for (size_t i = 0; i < max_num_factors; ++i) {
-          auto s = std::make_shared<SandoSolver>();
+          auto s = createTrajSolver(par_.solver);
           s->setPlannerName(planner_name_);
           if (!use_single_threaded_) s->setGurobiThreads(grb_threads_per_solver);
           s->initializeSolver(par_);

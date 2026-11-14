@@ -61,8 +61,12 @@ void prepareHighsScheduler(int threads) {
   scheduler_threads = threads;
 }
 
-// SHOT solves are serialized process-wide: SHOT keeps the state of its root search in global
-// variables (RootsearchMethodBoost.cpp), so concurrent solves corrupt each other.
+// SHOT solves are serialized process-wide when SHOT keeps the state of its root search in global
+// variables (RootsearchMethodBoost.cpp in SHOT versions before it was made per solver): concurrent
+// solves then corrupt each other. Such versions export those variables, which is how they are
+// recognized (see shotBackend).
+constexpr const char* kShotGlobalRootsearchSymbol = "_ZN4SHOT31lastActiveConstraintUpdateValueE";
+
 std::timed_mutex& shotMutex() {
   static std::timed_mutex mutex;
   return mutex;
@@ -70,9 +74,11 @@ std::timed_mutex& shotMutex() {
 
 // Loads the SHOT backend plugin (once) and returns its entry point, or nullptr with `error` set.
 // It is looked up at $SANDO_SHOT_BACKEND, then at its install location, then on the library path.
-detail::ShotSolveFunction shotBackend(std::string& error) {
+// `serialize` is set when the loaded SHOT cannot run concurrent solves.
+detail::ShotSolveFunction shotBackend(std::string& error, bool& serialize) {
   static std::once_flag once;
   static detail::ShotSolveFunction solve = nullptr;
+  static bool global_rootsearch = false;
   static std::string load_error;
   std::call_once(once, [] {
     std::vector<std::string> candidates;
@@ -90,12 +96,17 @@ detail::ShotSolveFunction shotBackend(std::string& error) {
         continue;
       }
       solve = reinterpret_cast<detail::ShotSolveFunction>(dlsym(handle, detail::kShotSolveSymbol));
-      if (solve) return;  // the plugin stays loaded for the lifetime of the process
+      if (solve) {
+        // dlsym on the plugin's handle also searches the libraries it depends on, i.e. SHOT
+        global_rootsearch = dlsym(handle, kShotGlobalRootsearchSymbol) != nullptr;
+        return;  // the plugin stays loaded for the lifetime of the process
+      }
       load_error += candidate + ": no symbol " + detail::kShotSolveSymbol + "; ";
       dlclose(handle);
     }
   });
   if (!solve) error = "could not load the SHOT backend plugin: " + load_error;
+  serialize = global_rootsearch;
   return solve;
 }
 
@@ -921,18 +932,20 @@ Status Model::solveWithShot(const Assembled& a, double time_limit) {
   last_backend_ = Backend::kShot;
   const auto start = Clock::now();
 
-  // Wait for the process-wide SHOT lock, giving up when asked to stop or out of time
+  bool serialize = false;
+  detail::ShotSolveFunction solve = shotBackend(last_error_, serialize);
+  if (!solve) return Status::kError;
+
+  // With an older SHOT, wait for the process-wide SHOT lock, giving up when asked to stop or out
+  // of time
   std::unique_lock<std::timed_mutex> lock(shotMutex(), std::defer_lock);
-  while (!lock.try_lock_for(std::chrono::milliseconds(1))) {
+  while (serialize && !lock.try_lock_for(std::chrono::milliseconds(1))) {
     if (shouldTerminate()) return Status::kInterrupted;
     if (secondsSince(start) >= time_limit) return Status::kTimeLimit;
   }
   if (shouldTerminate()) return Status::kInterrupted;
   const double remaining = time_limit - secondsSince(start);
   if (remaining <= 0.0) return Status::kTimeLimit;
-
-  detail::ShotSolveFunction solve = shotBackend(last_error_);
-  if (!solve) return Status::kError;
 
   detail::ShotOptions options;
   options.model_name = model_name_;

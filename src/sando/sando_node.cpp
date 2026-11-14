@@ -8,6 +8,18 @@
 
 #include <sando/sando_node.hpp>
 
+namespace {
+// Parameters that can change while SANDO runs; the others are read once at startup (map, global
+// planner, solver, segment counts, ...) and need a restart
+const std::vector<std::string> kLiveParameters = {
+    "v_max",        "a_max",
+    "j_max",        "horizon",
+    "goal_radius",  "goal_seen_radius",
+    "w_max",        "w_max_yawing",
+    "jerk_smooth_weight", "max_gurobi_comp_time_sec",
+    "visual_level", "debug_verbose"};
+}  // namespace
+
 // ----------------------------------------------------------------------------
 
 SANDO_NODE::SANDO_NODE() : Node("sando_node") {
@@ -166,6 +178,26 @@ SANDO_NODE::SANDO_NODE() : Node("sando_node") {
     timer_initial_pose_ = this->create_wall_timer(
         100ms, std::bind(&SANDO_NODE::getInitialPoseHwCallback, this), this->cb_group_mu_9_);
 
+  // Planner status for the web UI and other monitors (the status only lives inside SANDO)
+  pub_status_ = this->create_publisher<std_msgs::msg::String>("sando_status", 10);
+  timer_status_ = this->create_wall_timer(
+      200ms, std::bind(&SANDO_NODE::publishStatus, this), this->cb_group_mu_7_);
+
+  pub_tracked_obstacles_ =
+      this->create_publisher<visualization_msgs::msg::MarkerArray>("tracked_obstacles", 10);
+  timer_tracked_obstacles_ = this->create_wall_timer(
+      200ms, std::bind(&SANDO_NODE::publishTrackedObstacles, this), this->cb_group_mu_8_);
+
+  // Live parameter changes; "live_parameters" tells clients (the web UI) which ones are live
+  rcl_interfaces::msg::ParameterDescriptor live_desc;
+  live_desc.read_only = true;
+  live_desc.description = "Parameters that can be changed while SANDO runs";
+  this->declare_parameter("live_parameters", kLiveParameters, live_desc);
+  on_set_params_handle_ = this->add_on_set_parameters_callback(
+      std::bind(&SANDO_NODE::onSetParameters, this, std::placeholders::_1));
+  post_set_params_handle_ = this->add_post_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter>&) { params_pending_ = true; });
+
   // Stop the timer for callback
   if (timer_replanning_) timer_replanning_->cancel();
   if (timer_goal_) timer_goal_->cancel();
@@ -206,8 +238,11 @@ SANDO_NODE::SANDO_NODE() : Node("sando_node") {
     RCLCPP_INFO(this->get_logger(), "[rviz_only] Initialized map with empty point cloud");
   } else {
     // Synchronize the occupancy grid and unknown grid
-    occup_grid_sub_.subscribe(this, "occupancy_grid", rmw_qos_profile_sensor_data, options_map);
-    unknown_grid_sub_.subscribe(this, "unknown_grid", rmw_qos_profile_sensor_data, options_map);
+    // rclcpp::QoS, not rmw_qos_profile_t: Kilted's message_filters converts an
+    // rmw_qos_profile_t with QoSInitialization::from_rmw(), which drops the reliability (the
+    // subscription becomes RELIABLE and receives nothing from the BEST_EFFORT mapper)
+    occup_grid_sub_.subscribe(this, "occupancy_grid", rclcpp::SensorDataQoS(), options_map);
+    unknown_grid_sub_.subscribe(this, "unknown_grid", rclcpp::SensorDataQoS(), options_map);
     sync_.reset(new Sync(MySyncPolicy(10), occup_grid_sub_, unknown_grid_sub_));
     sync_->registerCallback(
         std::bind(&SANDO_NODE::mapCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -239,6 +274,9 @@ void SANDO_NODE::declareParameters() {
 
   // Visual
   this->declare_parameter("visual_level", 1);
+
+  // Trajectory optimization backend: auto, highs_shot or gurobi (see solver.hpp)
+  this->declare_parameter("solver", "auto");
 
   // Global planner parameters
   this->declare_parameter("file_path", "");
@@ -439,6 +477,9 @@ void SANDO_NODE::setParameters() {
 
   // Visual level
   par_.visual_level = this->get_parameter("visual_level").as_int();
+
+  // Trajectory optimization backend
+  par_.solver = this->get_parameter("solver").as_string();
 
   // Global Planner parameters
   file_path_ = this->get_parameter("file_path").as_string();
@@ -855,6 +896,9 @@ void SANDO_NODE::stateCallback(const dynus_interfaces::msg::State::SharedPtr msg
 // ----------------------------------------------------------------------------
 
 void SANDO_NODE::replanCallback() {
+  // Apply live parameter changes between replans
+  if (params_pending_.exchange(false)) applyPendingParameters();
+
   // Get the current time as double
   double current_time = this->now().seconds();
 
@@ -929,8 +973,9 @@ void SANDO_NODE::replanCallback() {
   // Always retrieve data so we can publish computation times
   retrieveData();
 
-  // Publish computation times topic
-  publishComputationTimes(replanning_result);
+  // Publish computation times topic, for the replans that planned: skipped ones (idle at the goal,
+  // goal already in reach, ...) carry stale times and would count as failures
+  if (sando_ptr_->lastReplanAttempted()) publishComputationTimes(replanning_result);
 
   // Verbose computation time to the terminal
   if (verbose_computation_time_) printComputationTime(replanning_result);
@@ -944,6 +989,98 @@ void SANDO_NODE::replanCallback() {
   // Usually this is done is goal callback but becuase we don't call that in push path test, we need
   // to call it here
   if (par_.use_path_push_for_visualization) publishFOV();
+}
+
+// ----------------------------------------------------------------------------
+
+
+rcl_interfaces::msg::SetParametersResult SANDO_NODE::onSetParameters(
+    const std::vector<rclcpp::Parameter>& params) {
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+  for (const auto& p : params) {
+    const auto& name = p.get_name();
+    if (std::find(kLiveParameters.begin(), kLiveParameters.end(), name) == kLiveParameters.end()) {
+      result.successful = false;
+      result.reason = "'" + name + "' is only read at startup (restart SANDO to change it)";
+      return result;
+    }
+    if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE && !(p.as_double() > 0.0)) {
+      result.successful = false;
+      result.reason = "'" + name + "' must be > 0";
+      return result;
+    }
+    if (name == "visual_level" && p.as_int() < 0) {
+      result.successful = false;
+      result.reason = "'visual_level' must be >= 0";
+      return result;
+    }
+  }
+  return result;
+}
+
+void SANDO_NODE::applyPendingParameters() {
+  par_.v_max = this->get_parameter("v_max").as_double();
+  par_.a_max = this->get_parameter("a_max").as_double();
+  par_.j_max = this->get_parameter("j_max").as_double();
+  par_.horizon = this->get_parameter("horizon").as_double();
+  par_.goal_radius = this->get_parameter("goal_radius").as_double();
+  par_.goal_seen_radius = this->get_parameter("goal_seen_radius").as_double();
+  par_.w_max = this->get_parameter("w_max").as_double();
+  par_.w_max_yawing = this->get_parameter("w_max_yawing").as_double();
+  par_.jerk_smooth_weight = this->get_parameter("jerk_smooth_weight").as_double();
+  par_.max_gurobi_comp_time_sec = this->get_parameter("max_gurobi_comp_time_sec").as_double();
+  par_.visual_level = this->get_parameter("visual_level").as_int();
+  par_.debug_verbose = this->get_parameter("debug_verbose").as_bool();
+  sando_ptr_->updateLiveParameters(par_);
+  std::cout << bold << "Parameters updated: v_max " << par_.v_max << ", a_max " << par_.a_max
+            << ", j_max " << par_.j_max << ", horizon " << par_.horizon << reset << std::endl;
+}
+
+void SANDO_NODE::publishStatus() {
+  static const char* kNames[] = {"YAWING", "TRAVELING", "GOAL_SEEN", "GOAL_REACHED",
+                                 "HOVER_AVOIDING"};
+  const int status = sando_ptr_ ? sando_ptr_->getDroneStatus() : -1;
+  std_msgs::msg::String msg;
+  msg.data = (status >= 0 && status < 5) ? kNames[status] : "UNKNOWN";
+  pub_status_->publish(msg);
+}
+
+void SANDO_NODE::publishTrackedObstacles() {
+  if (!sando_ptr_) return;
+  std::vector<std::shared_ptr<DynTraj>> trajs;
+  sando_ptr_->getTrajs(trajs);
+
+  visualization_msgs::msg::MarkerArray arr;
+  visualization_msgs::msg::Marker clear;
+  clear.header.frame_id = viz_frame_;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  arr.markers.push_back(clear);
+  const auto stamp = this->now();
+  for (const auto& t : trajs) {
+    if (!t) continue;
+    visualization_msgs::msg::Marker m;
+    m.header.frame_id = viz_frame_;
+    m.header.stamp = stamp;
+    m.ns = t->is_agent ? "agents" : "obstacles";
+    m.id = t->id;
+    m.type = visualization_msgs::msg::Marker::CUBE;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.pose.position.x = t->current_pos.x();
+    m.pose.position.y = t->current_pos.y();
+    m.pose.position.z = t->current_pos.z();
+    m.pose.orientation.w = 1.0;
+    m.scale.x = std::max(t->bbox.x(), 0.05);
+    m.scale.y = std::max(t->bbox.y(), 0.05);
+    m.scale.z = std::max(t->bbox.z(), 0.05);
+    m.color.a = 0.5;
+    m.color.r = t->is_agent ? 0.56 : 0.82;
+    m.color.g = t->is_agent ? 0.52 : 0.23;
+    m.color.b = t->is_agent ? 0.91 : 0.23;
+    m.lifetime = rclcpp::Duration::from_seconds(1.0);
+    arr.markers.push_back(m);
+  }
+  pub_tracked_obstacles_->publish(arr);
 }
 
 // ----------------------------------------------------------------------------

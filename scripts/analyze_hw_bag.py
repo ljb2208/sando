@@ -50,7 +50,7 @@ def is_ros2_bag(path):
     return os.path.isdir(path) and os.path.exists(os.path.join(path, "metadata.yaml"))
 
 
-def read_bag_topics(bag_path, topic_type_pairs, storage_id="sqlite3"):
+def read_bag_topics(bag_path, topic_type_pairs, storage_id=""):
     """Read specified topics from a bag. Returns {topic: [msgs]}."""
     type_map = {t: get_message(mt) for t, mt in topic_type_pairs}
     topic_names = [t for t, _ in topic_type_pairs]
@@ -75,7 +75,7 @@ def read_bag_topics(bag_path, topic_type_pairs, storage_id="sqlite3"):
     return out
 
 
-def discover_namespace(bag_path, storage_id="sqlite3"):
+def discover_namespace(bag_path, storage_id=""):
     """Discover the robot namespace from bag topics (e.g., /PX03)."""
     storage_options = StorageOptions(uri=bag_path, storage_id=storage_id)
     converter_options = ConverterOptions(

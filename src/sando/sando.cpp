@@ -51,9 +51,16 @@ SANDO::SANDO(Parameters par) : par_(par) {
   // all threads competing for all cores.
   const int num_cores = static_cast<int>(std::thread::hardware_concurrency());
   const int grb_threads_per_solver = std::max(1, num_cores / std::max(1, num_dynamic_factors_));
+  std::string built_solvers;
+  for (const auto& name : availableTrajSolvers())
+    built_solvers += (built_solvers.empty() ? "" : ", ") + name;
+  std::cout << bold << "Trajectory solver: " << resolveTrajSolverName(par_.solver)
+            << " (requested: " << par_.solver << ", built: " << built_solvers << ")" << reset
+            << std::endl;
+  grb_threads_per_solver_ = grb_threads_per_solver;
   whole_traj_solver_ptrs_.reserve(num_dynamic_factors_);
   for (int i = 0; i < num_dynamic_factors_; i++) {
-    auto solver = std::make_shared<SandoSolver>();
+    auto solver = createTrajSolver(par_.solver);
     solver->setGurobiThreads(grb_threads_per_solver);
     solver->initializeSolver(par_);
     whole_traj_solver_ptrs_.push_back(solver);
@@ -64,7 +71,7 @@ SANDO::SANDO(Parameters par) : par_(par) {
 
   // Pre-compute the worst initial_dt * par_.num_N (this is the worst case time allocated for the
   // whole trajectory)
-  auto tmp_traj_solver_ptr = std::make_shared<SandoSolver>();
+  auto tmp_traj_solver_ptr = createTrajSolver(par_.solver);
   tmp_traj_solver_ptr->initializeSolver(par_);
   tmp_traj_solver_ptr->resetToNominalState();
   RobotState tmp_start_state, tmp_end_state;
@@ -94,6 +101,36 @@ SANDO::SANDO(Parameters par) : par_(par) {
 
   // Map resolution
   map_res_ = par_.res;
+}
+
+// ----------------------------------------------------------------------------
+
+void SANDO::updateLiveParameters(const Parameters& par) {
+  // Scalars only: other threads (goal timer, state callback) read par_ concurrently
+  par_.v_max = par.v_max;
+  par_.a_max = par.a_max;
+  par_.j_max = par.j_max;
+  par_.horizon = par.horizon;
+  par_.goal_radius = par.goal_radius;
+  par_.goal_seen_radius = par.goal_seen_radius;
+  par_.w_max = par.w_max;
+  par_.w_max_yawing = par.w_max_yawing;
+  par_.jerk_smooth_weight = par.jerk_smooth_weight;
+  par_.max_gurobi_comp_time_sec = par.max_gurobi_comp_time_sec;
+  par_.debug_verbose = par.debug_verbose;
+
+  v_max_3d_ = Eigen::Vector3d(par_.v_max, par_.v_max, par_.v_max);
+  v_max_ = par_.v_max;
+  a_max_3d_ = Eigen::Vector3d(par_.a_max, par_.a_max, par_.a_max);
+  j_max_3d_ = Eigen::Vector3d(par_.j_max, par_.j_max, par_.j_max);
+
+  // The solvers take the limits and weights when they are initialized, so rebuild them (as
+  // after a solver error). Same count, so ellip_workers_ still matches.
+  for (auto& solver : whole_traj_solver_ptrs_) {
+    solver = createTrajSolver(par_.solver);
+    solver->setGurobiThreads(grb_threads_per_solver_);
+    solver->initializeSolver(par_);
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -577,6 +614,7 @@ std::tuple<bool, bool> SANDO::replan(double last_replaning_computation_time, dou
 
   // Reset Data
   resetData();
+  last_replan_attempted_ = false;
 
   // Check if we need to replan
   if (!checkReadyToReplan()) {
@@ -606,6 +644,7 @@ std::tuple<bool, bool> SANDO::replan(double last_replaning_computation_time, dou
 
   /* -------------------- Global Planning -------------------- */
 
+  last_replan_attempted_ = true;
   MyTimer timer_global(true);
   vec_Vecf<3> global_path;
   if (!generateGlobalPath(global_path, current_time, last_replaning_computation_time)) {
@@ -1322,7 +1361,7 @@ bool SANDO::generateLocalTrajectory(
 
   // If a Gurobi error occurred, reset the solver and return.
   if (gurobi_error_detected) {
-    whole_traj_solver_ptr = std::make_shared<SandoSolver>();
+    whole_traj_solver_ptr = createTrajSolver(par_.solver);
     whole_traj_solver_ptr->initializeSolver(par_);
     return false;
   }

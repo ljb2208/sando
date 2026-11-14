@@ -13,13 +13,22 @@
   <depend>rclcpp</depend>
   <depend>rclpy</depend>
   <depend>rclcpp_components</depend>
+  <depend>ament_index_cpp</depend>
   <depend>example_interfaces</depend>
   <depend>dynus_interfaces</depend>
   <depend>visualization_msgs</depend>
   <depend>decomp_ros_msgs</depend>
   <depend>gazebo_msgs</depend>
-  <depend>gazebo_ros</depend>
-  <depend>gazebo_plugins</depend>
+  <!-- Gazebo Classic is only available up to Humble; the Gazebo plugins are skipped elsewhere -->
+  <depend condition="$ROS_DISTRO == humble">gazebo_ros</depend>
+  <depend condition="$ROS_DISTRO == humble">gazebo_plugins</depend>
+  <!-- Gazebo Sim (gz) simulation for distros after Humble -->
+  <depend condition="$ROS_DISTRO != humble">ros_gz_interfaces</depend>
+  <exec_depend condition="$ROS_DISTRO != humble">ros_gz_sim</exec_depend>
+  <exec_depend condition="$ROS_DISTRO != humble">ros_gz_bridge</exec_depend>
+  <!-- sando::DynamicObstacles gz system -->
+  <depend condition="$ROS_DISTRO != humble">gz_sim_vendor</depend>
+  <depend condition="$ROS_DISTRO != humble">gz_plugin_vendor</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>

@@ -17,6 +17,7 @@
 #include <Eigen/Dense>
 #include <decomp_rviz_plugins/data_ros_utils.hpp>
 #include <sando/sando_type.hpp>
+#include <sando/solver.hpp>
 #include "hgp/termcolor.hpp"
 #include <sando/highs_shot_model.hpp>
 #include "timer.hpp"
@@ -33,22 +34,10 @@ class HighsShotCallback {
   HighsShotCallback() : should_terminate_(false) {}
 };
 
-class SolverHighsShot {
+class SolverHighsShot : public TrajSolver {
  public:
   enum ConstraintType { POSITION, VELOCITY, ACCELERATION, JERK };
 
-  // Sub-step timing breakdown from last generateNewTrajectory call (ms)
-  struct SolveTimingBreakdown {
-    double findDT_ms{0.0};
-    double setX_ms{0.0};
-    double polytopes_ms{0.0};
-    double dynamic_ms{0.0};
-    double objective_ms{0.0};
-    double mapsize_ms{0.0};
-    double callOptimizer_ms{0.0};
-    double postsolve_ms{0.0};
-  };
-  SolveTimingBreakdown last_solve_timing_;
 
   /** @brief Construct the solver, initialize the HiGHS/SHOT model and basis converter. */
   SolverHighsShot();
@@ -57,7 +46,7 @@ class SolverHighsShot {
   /** @brief Set the planner name to select the formulation (e.g., "SANDO" or "FASTER").
    *  @param name Planner identifier string.
    */
-  void setPlannerName(const std::string& name);
+  void setPlannerName(const std::string& name) override;
 
   /** @brief Set the number of threads HiGHS (and SHOT's HiGHS MIP subsolver) use.
    *  @param num_threads Number of threads (0 = solver default).
@@ -65,27 +54,27 @@ class SolverHighsShot {
   void setHighsThreads(int num_threads);
 
   /** @brief Alias of setHighsThreads() so callers of SolverGurobi work unchanged. */
-  void setGurobiThreads(int num_threads) { setHighsThreads(num_threads); }
+  void setGurobiThreads(int num_threads) override { setHighsThreads(num_threads); }
 
   /** @brief Initialize the solver with planner parameters (segment count, limits, bounds, etc.).
    *  @param par Planner parameters struct.
    */
-  void initializeSolver(const Parameters& par);
+  void initializeSolver(const Parameters& par) override;
 
   /** @brief Set the initial state (position, velocity, acceleration) for the trajectory.
    *  @param data Initial state.
    */
-  void setX0(const RobotState& data);
+  void setX0(const RobotState& data) override;
 
   /** @brief Set the trajectory start time.
    *  @param t0 Start time in seconds.
    */
-  void setT0(double t0);
+  void setT0(double t0) override;
 
   /** @brief Set the final (goal) state for the trajectory.
    *  @param data Final state.
    */
-  void setXf(const RobotState& data);
+  void setXf(const RobotState& data) override;
 
   /** @brief Set the desired final yaw direction.
    *  @param yawf Final yaw angle in radians.
@@ -95,7 +84,7 @@ class SolverHighsShot {
   /** @brief Retrieve the total trajectory duration.
    *  @param total_traj_time Output parameter set to the sum of all segment durations.
    */
-  void getTotalTrajTime(double& total_traj_time);
+  void getTotalTrajTime(double& total_traj_time) override;
 
   /** @brief Allocate and initialize the goal setpoints vector based on total trajectory time. */
   void initializeGoalSetpoints();
@@ -111,7 +100,7 @@ class SolverHighsShot {
       bool& solver_error_detected,
       double& solver_computation_time,
       double factor,
-      bool use_single_thread = false);
+      bool use_single_thread = false) override;
 
   /** @brief Try generating a trajectory by sweeping factors from initial to final.
    *  @param solver_error_detected Set to true if a solver error occurs.
@@ -128,21 +117,21 @@ class SolverHighsShot {
   bool callOptimizer();
 
   /** @brief Signal the running HiGHS/SHOT solve to abort the current optimization. */
-  void stopExecution();
+  void stopExecution() override;
 
   /** @brief Reset the termination flag so the solver can run again after a stop. */
-  void resetToNominalState();
+  void resetToNominalState() override;
 
   /** @brief Set time-invariant safety corridor polytopes.
    *  @param polytopes Vector of linear constraints defining convex polytopes.
    */
-  void setPolytopes(std::vector<LinearConstraint3D> polytopes);
+  void setPolytopes(std::vector<LinearConstraint3D> polytopes) override;
 
   /** @brief Set time-layered safety corridor polytopes (one set per trajectory segment).
    *  @param polytopes_by_time Outer vector indexed by time step, inner by polytope index.
    */
   void setPolytopesTimeLayered(
-      const std::vector<std::vector<LinearConstraint3D>>& polytopes_by_time);
+      const std::vector<std::vector<LinearConstraint3D>>& polytopes_by_time) override;
 
   /** @brief Add polytope containment constraints to the model via MIQP indicator
    * constraints. */
@@ -162,10 +151,10 @@ class SolverHighsShot {
   /** @brief Compute an initial time step estimate from the distance and dynamic limits.
    *  @return Estimated per-segment time step in seconds.
    */
-  double getInitialDt();
+  double getInitialDt() override;
 
   /** @brief Evaluate the solved trajectory at regular intervals to populate goal setpoints. */
-  void fillGoalSetPoints();
+  void fillGoalSetPoints() override;
 
   /** @brief Set the objective to minimize the squared jerk norm. */
   void setObjective();
@@ -444,7 +433,7 @@ class SolverHighsShot {
    * coefficients.
    *  @param pwp Output piecewise polynomial struct populated with times and per-axis coefficients.
    */
-  void getPieceWisePol(PieceWisePol& pwp);
+  void getPieceWisePol(PieceWisePol& pwp) override;
 
   /** @brief Check whether a control point depends on any free decision variable.
    *  @param type Constraint type (POSITION, VELOCITY, ACCELERATION, or JERK).
@@ -486,27 +475,27 @@ class SolverHighsShot {
   /** @brief Get Bezier position control points for all segments (post-optimization).
    *  @param cps Output vector of 3x4 matrices, one per segment.
    */
-  void getControlPoints(std::vector<Eigen::Matrix<double, 3, 4>>& cps);
+  void getControlPoints(std::vector<Eigen::Matrix<double, 3, 4>>& cps) override;
 
   /** @brief Retrieve the goal setpoints computed from the solved trajectory.
    *  @param goal_setpoints Output vector of evenly-spaced state samples along the trajectory.
    */
-  void getGoalSetpoints(std::vector<RobotState>& goal_setpoints);
+  void getGoalSetpoints(std::vector<RobotState>& goal_setpoints) override;
 
   /** @brief Set the initial per-segment time step used as the base for factor scaling.
    *  @param initial_dt Base time step in seconds.
    */
-  void setInitialDt(double initial_dt);
+  void setInitialDt(double initial_dt) override;
 
   /** @brief Get the dynamic factor value that produced the last successful solution.
    *  @return Factor value, or 0 if no solution has been found.
    */
-  double getFactorThatWorked();
+  double getFactorThatWorked() override;
 
   /** @brief Get the objective function value from the last successful optimization.
    *  @return Objective value, or NaN if no solution has been found.
    */
-  double getObjectiveValue() const { return objective_value_; }
+  double getObjectiveValue() const override { return objective_value_; }
 
   double objective_value_{std::numeric_limits<double>::quiet_NaN()};
   std::vector<RobotState> goal_setpoints_;

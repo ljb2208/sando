@@ -20,6 +20,10 @@
 #include "dynus_interfaces/msg/state.hpp"
 #include "gazebo_msgs/msg/entity_state.hpp"
 #include "gazebo_msgs/srv/set_entity_state.hpp"
+#ifdef SANDO_HAS_ROS_GZ
+#include "ros_gz_interfaces/msg/entity.hpp"
+#include "ros_gz_interfaces/srv/set_entity_pose.hpp"
+#endif
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "tf2/LinearMath/Quaternion.h"
@@ -42,6 +46,9 @@ class FakeSim : public rclcpp::Node {
     this->declare_parameter<std::vector<double>>("start_pos", {0.0, 0.0, 4.0});
     this->declare_parameter<double>("start_yaw", -1.57);
     this->declare_parameter<bool>("send_state_to_gazebo", true);
+    // "classic" (Gazebo Classic, gazebo_ros_state plugin) or "gz" (Gazebo Sim, via ros_gz_bridge)
+    this->declare_parameter<std::string>("gazebo_backend", "classic");
+    this->declare_parameter<std::string>("gz_set_pose_service", "/world/default/set_pose");
     this->declare_parameter<double>("default_goal_z", 0.3);
     this->declare_parameter<int>("visual_level", 0);
 
@@ -56,6 +63,8 @@ class FakeSim : public rclcpp::Node {
     auto start_pos = this->get_parameter("start_pos").as_double_array();
     double yaw = this->get_parameter("start_yaw").as_double();
     send_state_to_gazebo_ = this->get_parameter("send_state_to_gazebo").as_bool();
+    gazebo_backend_ = this->get_parameter("gazebo_backend").as_string();
+    std::string gz_set_pose_service = this->get_parameter("gz_set_pose_service").as_string();
     default_goal_z_ = this->get_parameter("default_goal_z").as_double();
     int visual_level = this->get_parameter("visual_level").as_int();
 
@@ -69,6 +78,7 @@ class FakeSim : public rclcpp::Node {
         this->get_logger(), "Start position: %f, %f, %f", start_pos[0], start_pos[1], start_pos[2]);
     RCLCPP_INFO(this->get_logger(), "Start yaw: %f", yaw);
     RCLCPP_INFO(this->get_logger(), "Send state to Gazebo: %d", send_state_to_gazebo_);
+    RCLCPP_INFO(this->get_logger(), "Gazebo backend: %s", gazebo_backend_.c_str());
     RCLCPP_INFO(this->get_logger(), "Default goal z: %f", default_goal_z_);
     RCLCPP_INFO(this->get_logger(), "Visual level: %d", visual_level);
     RCLCPP_INFO(this->get_logger(), "Publish odom: %d", publish_odom_);
@@ -134,7 +144,17 @@ class FakeSim : public rclcpp::Node {
 
     // Gazebo service client (only when needed — actual sending starts in pubCallback
     // after the initial sleep, giving spawn_entity.py time to create the entity)
-    if (send_state_to_gazebo_) {
+    if (send_state_to_gazebo_ && gazebo_backend_ == "gz") {
+#ifdef SANDO_HAS_ROS_GZ
+      gz_client_ = this->create_client<ros_gz_interfaces::srv::SetEntityPose>(gz_set_pose_service);
+      while (!gz_client_->wait_for_service(10s)) {
+        RCLCPP_INFO(this->get_logger(), "Gazebo service not available, waiting again...");
+      }
+#else
+      RCLCPP_FATAL(this->get_logger(), "gazebo_backend 'gz' requires building with ros_gz_interfaces");
+      throw std::runtime_error("fake_sim was built without ros_gz_interfaces");
+#endif
+    } else if (send_state_to_gazebo_) {
       gazebo_client_ =
           this->create_client<gazebo_msgs::srv::SetEntityState>("/plug/set_entity_state");
       while (!gazebo_client_->wait_for_service(10s)) {
@@ -175,6 +195,10 @@ class FakeSim : public rclcpp::Node {
 
   rclcpp::Subscription<dynus_interfaces::msg::Goal>::SharedPtr sub_goal_;
   rclcpp::Client<gazebo_msgs::srv::SetEntityState>::SharedPtr gazebo_client_;
+#ifdef SANDO_HAS_ROS_GZ
+  rclcpp::Client<ros_gz_interfaces::srv::SetEntityPose>::SharedPtr gz_client_;
+#endif
+  std::string gazebo_backend_{"classic"};
   rclcpp::TimerBase::SharedPtr timer_;
 
   dynus_interfaces::msg::State state_;
@@ -274,6 +298,12 @@ class FakeSim : public rclcpp::Node {
   }
 
   void sendGazeboState() {
+#ifdef SANDO_HAS_ROS_GZ
+    if (gz_client_) {
+      sendGzState();
+      return;
+    }
+#endif
     auto request = std::make_shared<gazebo_msgs::srv::SetEntityState::Request>();
     request->state.name = ns_;
 
@@ -293,6 +323,30 @@ class FakeSim : public rclcpp::Node {
       // Keep silent (same behavior as your original code)
     }
   }
+
+#ifdef SANDO_HAS_ROS_GZ
+  void sendGzState() {
+    auto request = std::make_shared<ros_gz_interfaces::srv::SetEntityPose::Request>();
+    request->entity.name = ns_;
+    request->entity.type = ros_gz_interfaces::msg::Entity::MODEL;
+
+    request->pose.position.x = state_.pos.x;
+    request->pose.position.y = state_.pos.y;
+    request->pose.position.z = state_.pos.z;
+    request->pose.orientation.x = state_.quat.x;
+    request->pose.orientation.y = state_.quat.y;
+    request->pose.orientation.z = state_.quat.z;
+    request->pose.orientation.w = state_.quat.w;
+
+    auto future = gz_client_->async_send_request(request);
+
+    try {
+      (void)future.get();
+    } catch (const std::exception&) {
+      // Keep silent (same behavior as the Gazebo Classic path)
+    }
+  }
+#endif
 
   void getInterpolatedTransform() {
     t_.header.stamp = this->get_clock()->now();

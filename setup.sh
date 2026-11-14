@@ -193,6 +193,16 @@ for d in "$SCRIPT_DIR"/deps/*/; do
     name=$(basename "$d")
     # Skip deps built in separate workspaces
     case "$name" in Livox-SDK2|livox_ros_driver2|DecompROS2) continue;; esac
+    # Gazebo Classic is only available up to Humble: keep just gazebo_msgs and skip the
+    # Gazebo Classic simulation packages
+    if [ "$ROS_DISTRO" != "humble" ]; then
+        case "$name" in
+            gazebo_ros_pkgs)
+                [ -e "$WS_SRC/gazebo_msgs" ] || ln -s "$d/gazebo_msgs" "$WS_SRC/gazebo_msgs"
+                continue;;
+            livox_laser_simulation_ros2|realsense_gazebo_plugin|unitree-go2-ros2) continue;;
+        esac
+    fi
     if [ ! -e "$WS_SRC/$name" ]; then
         ln -s "$d" "$WS_SRC/$name"
         echo "  Linked: $name"

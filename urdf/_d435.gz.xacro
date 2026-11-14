@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+
+<!--
+Gazebo Sim (gz) version of _d435.gazebo.xacro: the realsense_gazebo_plugin (Gazebo Classic only)
+is replaced with gz's built-in camera and depth_camera sensors. Topics are bridged to ROS by
+ros_gz_bridge (see onboard_sando.launch.py) under the same names the Classic plugin used.
+-->
+
+<robot xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:macro name="gazebo_d435" params="camera_name
+                                          reference_link
+                                          topics_ns
+                                          range_max_depth
+                                          depth_optical_frame
+                                          color_optical_frame
+                                          infrared1_optical_frame
+                                          infrared2_optical_frame
+                                          publish_pointcloud:=true" >
+
+    <xacro:property name="deg_to_rad" value="0.01745329251994329577" />
+    <gazebo reference="${reference_link}">
+      <sensor name="${camera_name}color" type="camera">
+        <camera name="${camera_name}color">
+          <horizontal_fov>${85.2*deg_to_rad}</horizontal_fov>
+          <image>
+            <width>720</width>
+            <height>540</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+          <camera_info_topic>${topics_ns}/d435/color/camera_info</camera_info_topic>
+        </camera>
+        <gz_frame_id>${topics_ns}/${color_optical_frame}</gz_frame_id>
+        <topic>${topics_ns}/d435/color/image_raw</topic>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>0</visualize>
+      </sensor>
+      <!-- Points are published on <topic>/points, i.e. ${topics_ns}/d435/depth/color/points.
+           gz expresses them in the camera body convention (x forward, z up), not the optical
+           frame, so they are tagged with ${camera_name}_depth_frame -->
+
+      <sensor name="${camera_name}depth" type="depth_camera">
+        <camera name="${camera_name}depth">
+          <horizontal_fov>${85.2*deg_to_rad}</horizontal_fov>
+          <image>
+            <width>120</width>
+            <height>90</height>
+            <format>R_FLOAT32</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>${range_max_depth}</far>
+          </clip>
+          <camera_info_topic>${topics_ns}/d435/depth/camera_info</camera_info_topic>
+        </camera>
+        <gz_frame_id>${topics_ns}/${camera_name}_depth_frame</gz_frame_id>
+        <topic>${topics_ns}/d435/depth/color</topic>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>0</visualize>
+      </sensor>
+    </gazebo>
+
+  </xacro:macro>
+</robot>

@@ -490,7 +490,7 @@ static BagData read_bag_single_pass(const fs::path& bag_path, const std::string&
   rosbag2_cpp::Reader reader;
   rosbag2_storage::StorageOptions storage_options;
   storage_options.uri = bag_path.string();
-  storage_options.storage_id = "sqlite3";
+  // Leave storage_id empty so the format (sqlite3 or mcap) is detected from the bag's metadata
 
   try {
     reader.open(storage_options);
@@ -506,7 +506,7 @@ static BagData read_bag_single_pass(const fs::path& bag_path, const std::string&
   while (reader.has_next()) {
     try {
       auto msg = reader.read_next();
-      double timestamp = msg->time_stamp / 1e9;
+      double timestamp = msg->recv_timestamp / 1e9;
 
       if (msg->topic_name == "/NX01/goal") {
         dynus_interfaces::msg::Goal goal_msg;

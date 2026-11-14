@@ -21,10 +21,12 @@ set(decomp_rviz_plugins_FOUND 1)
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
-find_package(gazebo REQUIRED) # Note: if you put this line later on, it gives an error
+# Gazebo Classic is optional: it is only available up to ROS 2 Humble
+find_package(gazebo QUIET) # Note: if you put this line later on, it gives an error
 find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(example_interfaces REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -39,31 +41,12 @@ find_package(dynus_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(gazebo_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(gazebo_ros REQUIRED)
+find_package(gazebo_ros QUIET)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(nlohmann_json REQUIRED)
-
-# Trajectory optimization backend: SolverHighsShot (HiGHS + SHOT) by default, or SolverGurobi with
-#   colcon build --cmake-args -DSANDO_USE_GUROBI=ON
-option(SANDO_USE_GUROBI "Use Gurobi (SolverGurobi) instead of HiGHS + SHOT (SolverHighsShot)" OFF)
-
-if(SANDO_USE_GUROBI)
-  list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
-  find_package(GUROBI REQUIRED)
-
-  # check if gurobi is found
-  if(GUROBI_FOUND)
-  message(STATUS "GUROBI FOUND")
-  else(GUROBI_FOUND)
-  message(FATAL_ERROR "GUROBI NOT FOUND!")
-  endif(GUROBI_FOUND)
-else()
-  find_package(highs REQUIRED)
-  find_package(SHOT REQUIRED)
-endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
 
@@ -76,21 +59,27 @@ if (OPENMP_FOUND)
 endif()
 
 # include directories
-include_directories(${EIGEN3_INCLUDE_DIR} ${PCL_INCLUDE_DIRS} ${DECOMP_UTIL_INCLUDE_DIRS} ${GAZEBO_INCLUDE_DIRS} ${GUROBI_INCLUDE_DIRS} include)
+include_directories(${EIGEN3_INCLUDE_DIR} ${PCL_INCLUDE_DIRS} ${DECOMP_UTIL_INCLUDE_DIRS} ${GAZEBO_INCLUDE_DIRS} include)
 link_directories(${PCL_LIBRARY_DIRS} ${BOOST_LIBRARY_DIRS} ${GAZEBO_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-if(SANDO_USE_GUROBI)
-  message(STATUS "Trajectory solver: Gurobi (SolverGurobi)")
-  # set up for gurobi
-  FILE(GLOB GurobiSOFiles $ENV{GUROBI_HOME}/lib/libgurobi*[0-9].so) #files that are start with libgurobi and end with number.so
-  set(GUROBI_LIBRARIES "$ENV{GUROBI_HOME}/lib/libgurobi_c++.a;${GurobiSOFiles};$ENV{GUROBI_HOME}/lib/" )
-  # Selects SolverGurobi in include/sando/solver.hpp
-  add_definitions(-DSANDO_USE_GUROBI)
-  set(SANDO_SOLVER_SOURCES src/sando/gurobi_solver.cpp)
-  set(SANDO_SOLVER_LIBRARIES ${GUROBI_LIBRARIES})
-else()
-  message(STATUS "Trajectory solver: HiGHS + SHOT (SolverHighsShot)")
+# Trajectory optimization backends, selected at runtime with the "solver" parameter (see
+# include/sando/solver.hpp). Each one is built when its solver is found; at least one is required.
+# -DSANDO_WITH_HIGHS_SHOT=OFF or -DSANDO_WITH_GUROBI=OFF leaves one out.
+option(SANDO_WITH_HIGHS_SHOT "Build the HiGHS + SHOT backend (SolverHighsShot) if HiGHS and SHOT are found" ON)
+option(SANDO_WITH_GUROBI "Build the Gurobi backend (SolverGurobi) if Gurobi is found" ON)
+
+# sando_solvers: the backend factory and the backends that are built
+add_library(sando_solvers STATIC src/sando/solver_factory.cpp)
+set_target_properties(sando_solvers PROPERTIES POSITION_INDEPENDENT_CODE ON)
+ament_target_dependencies(sando_solvers PUBLIC Eigen3 decomp_util decomp_rviz_plugins)
+set(SANDO_SOLVERS_BUILT "")
+
+if(SANDO_WITH_HIGHS_SHOT)
+  find_package(highs QUIET)
+  find_package(SHOT QUIET)
+endif()
+if(SANDO_WITH_HIGHS_SHOT AND highs_FOUND AND SHOT_FOUND)
   # SHOT is used only through a plugin loaded at runtime with RTLD_LOCAL | RTLD_DEEPBIND, never
   # linked: SHOT exports its own copy of spdlog, which ROS' logging would otherwise bind to,
   # aborting the nodes in rclcpp::init (see src/sando/highs_shot_assembled.hpp)
@@ -114,9 +103,55 @@ else()
   ament_target_dependencies(sando_highs_shot_solver PUBLIC Eigen3 decomp_util decomp_rviz_plugins)
   # The modeling layer represents infinite bounds with IEEE infinity, which -ffast-math assumes away
   set_source_files_properties(src/sando/highs_shot_model.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
-  set(SANDO_SOLVER_SOURCES "")
-  set(SANDO_SOLVER_LIBRARIES sando_highs_shot_solver)
+
+  target_link_libraries(sando_solvers PUBLIC sando_highs_shot_solver)
+  target_compile_definitions(sando_solvers PRIVATE SANDO_HAS_HIGHS_SHOT)
+  list(APPEND SANDO_SOLVERS_BUILT highs_shot)
+elseif(SANDO_WITH_HIGHS_SHOT)
+  message(STATUS "HiGHS or SHOT not found: not building the highs_shot solver backend")
 endif()
+
+if(SANDO_WITH_GUROBI)
+  # Gurobi install: -DGUROBI_HOME=..., else $GUROBI_HOME, else the newest /opt/gurobi*/linux64
+  if(NOT GUROBI_HOME)
+    if(DEFINED ENV{GUROBI_HOME})
+      set(GUROBI_HOME "$ENV{GUROBI_HOME}")
+    else()
+      file(GLOB _gurobi_homes /opt/gurobi*/linux64)
+      if(_gurobi_homes)
+        list(SORT _gurobi_homes COMPARE NATURAL ORDER DESCENDING)
+        list(GET _gurobi_homes 0 GUROBI_HOME)
+      endif()
+    endif()
+  endif()
+  set(GUROBI_HOME "${GUROBI_HOME}" CACHE PATH "Gurobi installation (the directory with include/ and lib/)")
+  # libgurobi<version>.so (not the _light variant) and the C++ interface
+  file(GLOB GUROBI_C_LIBRARY "${GUROBI_HOME}/lib/libgurobi[0-9][0-9]*[0-9].so")
+endif()
+if(SANDO_WITH_GUROBI AND GUROBI_C_LIBRARY AND EXISTS "${GUROBI_HOME}/lib/libgurobi_c++.a"
+   AND EXISTS "${GUROBI_HOME}/include/gurobi_c++.h")
+  list(GET GUROBI_C_LIBRARY 0 GUROBI_C_LIBRARY)
+  message(STATUS "Gurobi found: ${GUROBI_C_LIBRARY}")
+
+  add_library(sando_gurobi_solver STATIC src/sando/gurobi_solver.cpp)
+  set_target_properties(sando_gurobi_solver PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sando_gurobi_solver PUBLIC "${GUROBI_HOME}/include")
+  target_link_libraries(sando_gurobi_solver PUBLIC "${GUROBI_HOME}/lib/libgurobi_c++.a" "${GUROBI_C_LIBRARY}")
+  ament_target_dependencies(sando_gurobi_solver PUBLIC Eigen3 decomp_util decomp_rviz_plugins)
+
+  target_link_libraries(sando_solvers PUBLIC sando_gurobi_solver)
+  target_compile_definitions(sando_solvers PRIVATE SANDO_HAS_GUROBI)
+  list(APPEND SANDO_SOLVERS_BUILT gurobi)
+elseif(SANDO_WITH_GUROBI)
+  message(STATUS "Gurobi not found (GUROBI_HOME='${GUROBI_HOME}'): not building the gurobi solver backend")
+endif()
+
+if(NOT SANDO_SOLVERS_BUILT)
+  message(FATAL_ERROR "No trajectory solver backend: install HiGHS + SHOT or Gurobi")
+endif()
+message(STATUS "Trajectory solver backends: ${SANDO_SOLVERS_BUILT}")
+set(SANDO_SOLVER_SOURCES "")
+set(SANDO_SOLVER_LIBRARIES sando_solvers)
 
 # add executables
 add_executable(sando src/sando/sando_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
@@ -126,7 +161,13 @@ ament_target_dependencies(sando rclcpp example_interfaces dynus_interfaces visua
 # Add the fake_sim executable
 add_executable(fake_sim src/sando/fake_sim.cpp)
 target_link_libraries(fake_sim)
-ament_target_dependencies(fake_sim rclcpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
+ament_target_dependencies(fake_sim rclcpp rclcpp_components ament_index_cpp visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
+# Gazebo Sim (gz) support: pose updates go through ros_gz_bridge's SetEntityPose service
+find_package(ros_gz_interfaces QUIET)
+if(ros_gz_interfaces_FOUND)
+  target_compile_definitions(fake_sim PRIVATE SANDO_HAS_ROS_GZ)
+  ament_target_dependencies(fake_sim ros_gz_interfaces)
+endif()
 
 # Add the obstacle tracker
 add_executable(obstacle_tracker_node src/sando/obstacle_tracker_node.cpp src/hgp/utils.cpp src/sando/utils.cpp)
@@ -158,20 +199,49 @@ add_executable(convert_velodyne_to_ros_time src/sando/convert_velodyne_to_ros_ti
 target_link_libraries(convert_velodyne_to_ros_time)
 ament_target_dependencies(convert_velodyne_to_ros_time rclcpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
 
-# For dynamic obstacles in Gazebo (per-model plugin, legacy)
-add_library(move_model SHARED src/sim/move_model.cpp)
-target_link_libraries(move_model ${GAZEBO_LIBRARIES})
-ament_target_dependencies(move_model rclcpp tf2 tf2_ros geometry_msgs)
+if(gazebo_FOUND AND gazebo_ros_FOUND)
+  # For dynamic obstacles in Gazebo (per-model plugin, legacy)
+  add_library(move_model SHARED src/sim/move_model.cpp)
+  target_link_libraries(move_model ${GAZEBO_LIBRARIES})
+  ament_target_dependencies(move_model rclcpp tf2 tf2_ros geometry_msgs)
 
-# World plugin: single plugin manages ALL dynamic obstacles (replaces N move_model instances)
-add_library(dynamic_obstacles_world_plugin SHARED src/sim/dynamic_obstacles_world_plugin.cpp)
-target_link_libraries(dynamic_obstacles_world_plugin ${GAZEBO_LIBRARIES})
-ament_target_dependencies(dynamic_obstacles_world_plugin)
+  # World plugin: single plugin manages ALL dynamic obstacles (replaces N move_model instances)
+  add_library(dynamic_obstacles_world_plugin SHARED src/sim/dynamic_obstacles_world_plugin.cpp)
+  target_link_libraries(dynamic_obstacles_world_plugin ${GAZEBO_LIBRARIES})
+  ament_target_dependencies(dynamic_obstacles_world_plugin)
 
-# For gazebo plugins (IMU)
-add_library(imu_plugin SHARED src/sim/gazebo_ros_imu_sensor.cpp)
-target_link_libraries(imu_plugin ${GAZEBO_LIBRARIES})
-ament_target_dependencies(imu_plugin sensor_msgs gazebo_ros)
+  # For gazebo plugins (IMU)
+  add_library(imu_plugin SHARED src/sim/gazebo_ros_imu_sensor.cpp)
+  target_link_libraries(imu_plugin ${GAZEBO_LIBRARIES})
+  ament_target_dependencies(imu_plugin sensor_msgs gazebo_ros)
+
+  install(TARGETS
+    move_model
+    imu_plugin
+    dynamic_obstacles_world_plugin
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+  )
+else()
+  message(STATUS "Gazebo Classic not found: skipping Gazebo plugins")
+endif()
+
+# Gazebo Sim (gz) system: spawns and moves ALL dynamic obstacles (gz version of
+# dynamic_obstacles_world_plugin). Found through the ROS vendor packages (gz-sim 9 on Kilted).
+find_package(gz_sim_vendor QUIET)
+find_package(gz-sim QUIET)
+find_package(gz_plugin_vendor QUIET)
+find_package(gz-plugin QUIET COMPONENTS register)
+if(gz-sim_FOUND AND gz-plugin_FOUND)
+  add_library(sando_gz_dynamic_obstacles SHARED src/sim/gz_dynamic_obstacles_system.cpp)
+  target_link_libraries(sando_gz_dynamic_obstacles gz-sim::gz-sim gz-plugin::register)
+  install(TARGETS sando_gz_dynamic_obstacles LIBRARY DESTINATION lib)
+  # Puts lib/ on GZ_SIM_SYSTEM_PLUGIN_PATH when the workspace is sourced
+  ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/${PROJECT_NAME}_gz.dsv.in")
+else()
+  message(STATUS "Gazebo Sim not found: skipping Gazebo Sim systems")
+endif()
 
 # For dynamic forest node
 add_executable(dynamic_forest_node src/sim/dynamic_forest_node.cpp)
@@ -203,6 +273,13 @@ add_executable(temporal_layered_corridor_test_node src/sando/temporal_layered_co
 target_link_libraries(temporal_layered_corridor_test_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(temporal_layered_corridor_test_node rclcpp visualization_msgs std_msgs geometry_msgs Eigen3 decomp_util decomp_ros_msgs decomp_rviz_plugins decomp_test_node tf2 tf2_ros tf2_geometry_msgs tf2_eigen std_srvs pcl_ros pcl_conversions sensor_msgs dynus_interfaces)
 
+# libgurobi<version>.so is outside the default library path: find it without LD_LIBRARY_PATH
+if(TARGET sando_gurobi_solver)
+  set_target_properties(sando corridor_generator_node local_traj_benchmark_node
+    visualize_local_trajs_node temporal_layered_corridor_test_node
+    PROPERTIES INSTALL_RPATH "${GUROBI_HOME}/lib")
+endif()
+
 # Benchmark analysis tool (C++ port of analyze_dynamic_benchmark.py)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_storage REQUIRED)
@@ -222,6 +299,7 @@ rviz
 worlds
 urdf
 meshes
+web
 DESTINATION share/${PROJECT_NAME}
 )
 
@@ -245,21 +323,12 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# install for libraries
-install(TARGETS
-  move_model
-  imu_plugin
-  dynamic_obstacles_world_plugin
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
-)
-
 # Python modules (none — scripts are installed directly below)
 
 # install Python executables
 install(PROGRAMS
   scripts/goal_sender.py
+  scripts/sando_web.py
   scripts/goal_relay.py
   scripts/goal_monitor_node.py
   scripts/generate_random_forest.py

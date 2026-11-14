@@ -10,6 +10,7 @@
 
 // C++ standard library
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -36,7 +37,7 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/time_synchronizer.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/create_timer_ros.h>
 #include <tf2_ros/message_filter.h>
@@ -150,6 +151,20 @@ class SANDO_NODE : public rclcpp::Node {
   void printComputationTime(bool result);
   /** @brief Publishes computation times as a ROS message for external monitoring. */
   void publishComputationTimes(bool result);
+
+  /** @brief Publish the planner status (YAWING, TRAVELING, ...) on "sando_status". */
+  void publishStatus();
+
+  /** @brief Publish the obstacles and agents SANDO tracks, one box each, on "tracked_obstacles"
+   *  (a compact, rate-limited view of /trajs for the web UI and RViz). */
+  void publishTrackedObstacles();
+
+  /** @brief Validate a parameter change: only the live parameters (kLiveParameters) are accepted. */
+  rcl_interfaces::msg::SetParametersResult onSetParameters(
+      const std::vector<rclcpp::Parameter>& params);
+
+  /** @brief Apply accepted parameter changes; called from the replanning thread between replans. */
+  void applyPendingParameters();
   /** @brief Records benchmark data for the current replan cycle. */
   void recordData(bool result);
   /** @brief Writes accumulated benchmark data to a log file. */
@@ -213,6 +228,16 @@ class SANDO_NODE : public rclcpp::Node {
   rclcpp::TimerBase::SharedPtr timer_update_tmap_;
   rclcpp::TimerBase::SharedPtr timer_goal_reached_check_;
   rclcpp::TimerBase::SharedPtr timer_cleanup_old_trajs_;
+  rclcpp::TimerBase::SharedPtr timer_status_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_status_;
+  rclcpp::TimerBase::SharedPtr timer_tracked_obstacles_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_tracked_obstacles_;
+
+  // Live parameter changes (ros2 param set, the web UI): accepted in onSetParameters, applied in
+  // the replanning thread so no solve is running when the solvers are rebuilt
+  OnSetParametersCallbackHandle::SharedPtr on_set_params_handle_;
+  PostSetParametersCallbackHandle::SharedPtr post_set_params_handle_;
+  std::atomic<bool> params_pending_{false};
   rclcpp::TimerBase::SharedPtr timer_trajs_update_for_tmap_;
   rclcpp::TimerBase::SharedPtr timer_check_plan_safety_;
   rclcpp::TimerBase::SharedPtr timer_initial_pose_;

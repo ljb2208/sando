@@ -96,6 +96,11 @@ def _spawn_static_block(context):
 
     # Check if we should skip Gazebo spawning (rviz-only mode)
     skip_gazebo = _as_bool(context, "skip_gazebo", False)
+    # Gazebo Sim: the obstacles are written to this file for the sando::DynamicObstacles
+    # system (see base_sando.launch.py) instead of being spawned one model at a time
+    gz_obstacles_json = (
+        LaunchConfiguration("gz_obstacles_json").perform(context).strip()
+    )
 
     # Check if a pre-generated obstacles JSON file is provided
     obstacles_json_file = (
@@ -229,8 +234,8 @@ def _spawn_static_block(context):
             sx = sy = sz = 0.0  # No scale for static
             offset = slower = 0.0
 
-        # Only spawn in Gazebo if not in skip_gazebo mode
-        if not skip_gazebo:
+        # Only spawn in Gazebo Classic if not in skip_gazebo mode
+        if not skip_gazebo and not gz_obstacles_json:
             # for Gazebo
             robot_description = ParameterValue(
                 Command(
@@ -321,6 +326,14 @@ def _spawn_static_block(context):
     # get the home directory of the user
     print("Saving obstacles metadata to context.locals['obstacles_json']")
     _OBSTACLES_JSON_STORAGE["obstacles_json"] = json.dumps(obstacles_meta)
+
+    if not skip_gazebo and gz_obstacles_json:
+        # Write then rename so the gz system, which polls for the file, never reads it half-written
+        tmp_path = gz_obstacles_json + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(obstacles_meta, f)
+        os.replace(tmp_path, gz_obstacles_json)
+        print(f"[dyn_obstacles][spawn] Wrote {len(obstacles_meta)} obstacles to {gz_obstacles_json}")
 
     return actions
 
@@ -417,6 +430,12 @@ def generate_launch_description():
             "skip_gazebo",
             default_value="false",
             description="Skip Gazebo spawning (RViz-only mode)",
+        ),
+        DeclareLaunchArgument(
+            "gz_obstacles_json",
+            default_value="",
+            description="Gazebo Sim only: write the obstacles to this file for the "
+            "sando::DynamicObstacles system instead of spawning Gazebo Classic models",
         ),
         # Spatial ranges
         DeclareLaunchArgument("x_min", default_value="5.0"),

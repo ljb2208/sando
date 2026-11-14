@@ -4,6 +4,8 @@
     <!-- Arguments -->
     <xacro:arg name="namespace" default="NX01" />
     <xacro:arg name="d435_range_max_depth" default="5.0" />
+    <!-- Simulator: "classic" (Gazebo Classic) or "gz" (Gazebo Sim) -->
+    <xacro:arg name="gazebo" default="classic" />
 
     <!-- Constants -->
     <!-- <xacro:property name="M_PI" value="3.1415926535897931" /> -->
@@ -16,8 +18,13 @@
 
     <!-- Note: added $(arg namespace)_ to the name to avoid having multiple sensors with the same name when using multiple agents -->
 
-    <!-- Livox -->
-    <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+    <!-- Livox (the ros2_livox_simulation plugin is Gazebo Classic only; gz uses a gpu_lidar approximation) -->
+    <xacro:if value="${'$(arg gazebo)' == 'gz'}">
+      <xacro:include filename="$(find sando)/urdf/_mid360.gz.xacro" />
+    </xacro:if>
+    <xacro:unless value="${'$(arg gazebo)' == 'gz'}">
+      <xacro:include filename="$(find ros2_livox_simulation)/urdf/mid360.xacro" />
+    </xacro:unless>
     <xacro:mid360 name="$(arg namespace)_livox" namespace="$(arg namespace)" parent="base_link" topic="mid360" >
       <origin xyz="0 0 0.2" rpy="0 0.3 0"/>
     </xacro:mid360>

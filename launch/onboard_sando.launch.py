@@ -3,13 +3,22 @@
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import Command, PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
 import yaml
 from math import radians
+
+
+def gazebo_backend():
+    """Gazebo Classic ("classic") when gazebo_ros is installed (Humble), else Gazebo Sim ("gz")."""
+    try:
+        get_package_share_directory("gazebo_ros")
+        return "classic"
+    except PackageNotFoundError:
+        return "gz"
 
 
 def convert_str_to_bool(str):
@@ -49,6 +58,20 @@ def generate_launch_description():
     global_planner_arg = DeclareLaunchArgument(
         "global_planner", default_value="sjps", description="Global planner to use"
     )  # global planner
+    solver_arg = DeclareLaunchArgument(
+        "solver",
+        default_value="",
+        description="Trajectory optimization backend: highs_shot, gurobi or auto "
+        "(empty: the 'solver' parameter of the config file)",
+    )  # trajectory solver
+    web_arg = DeclareLaunchArgument(
+        "web",
+        default_value="false",
+        description="Start the SANDO web interface (status, performance, parameters, 3D view)",
+    )
+    web_port_arg = DeclareLaunchArgument(
+        "web_port", default_value="8080", description="Port of the web interface"
+    )
     use_benchmark_arg = DeclareLaunchArgument(
         "use_benchmark",
         default_value="false",
@@ -110,6 +133,7 @@ def generate_launch_description():
 
     # Opaque function to launch nodes
     def launch_setup(context, *args, **kwargs):
+        backend = gazebo_backend()
 
         x = LaunchConfiguration("x").perform(context)
         y = LaunchConfiguration("y").perform(context)
@@ -121,6 +145,9 @@ def generate_launch_description():
         )
         data_file = LaunchConfiguration("data_file").perform(context)
         global_planner = LaunchConfiguration("global_planner").perform(context)
+        solver = LaunchConfiguration("solver").perform(context)
+        web = convert_str_to_bool(LaunchConfiguration("web").perform(context))
+        web_port = int(LaunchConfiguration("web_port").perform(context))
         use_benchmark = convert_str_to_bool(
             LaunchConfiguration("use_benchmark").perform(context)
         )
@@ -209,6 +236,9 @@ def generate_launch_description():
                 skip_initial_yawing_override
             )
 
+        if solver:
+            parameters["solver"] = solver
+
         # Update parameters for benchmarking
         parameters["file_path"] = data_file
         parameters["use_benchmark"] = bool(use_benchmark)
@@ -246,6 +276,8 @@ def generate_launch_description():
                                 namespace,
                                 " d435_range_max_depth:=",
                                 str(parameters["depth_camera_depth_max"]),
+                                " gazebo:=",
+                                backend,
                             ]
                         ),
                         value_type=str,
@@ -260,31 +292,77 @@ def generate_launch_description():
         # Spawn entity node for Gazebo
         # Get the start position and yaw from the parameters
         yaw = str(radians(float(yaw)))
-        spawn_entity_node = Node(
-            package="gazebo_ros",
-            executable="spawn_entity.py",
-            name="spawn_entity",
-            namespace=namespace,
-            parameters=[
-                {
-                    "use_sim_time": False,
-                }
-            ],
-            arguments=[
-                "-topic",
-                "robot_description",
-                "-entity",
-                namespace,
-                "-x",
-                x,
-                "-y",
-                y,
-                "-z",
-                z,
-                "-Y",
-                yaw,
-            ],
-        )
+        if backend == "gz":
+            spawn_entity_node = Node(
+                package="ros_gz_sim",
+                executable="create",
+                name="spawn_entity",
+                namespace=namespace,
+                arguments=[
+                    "-world",
+                    "default",
+                    "-topic",
+                    "robot_description",
+                    "-name",
+                    namespace,
+                    "-x",
+                    x,
+                    "-y",
+                    y,
+                    "-z",
+                    z,
+                    "-Y",
+                    yaw,
+                ],
+            )
+
+            # Bridge the D435 and Mid-360 topics from Gazebo Sim to the names the Classic plugin used
+            d435 = f"/{namespace}/d435"
+            gz_bridge_node = Node(
+                package="ros_gz_bridge",
+                executable="parameter_bridge",
+                name="gz_sensor_bridge",
+                namespace=namespace,
+                output="log",
+                arguments=[
+                    f"{d435}/depth/color/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
+                    f"{d435}/depth/color@sensor_msgs/msg/Image[gz.msgs.Image",
+                    f"{d435}/depth/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+                    f"{d435}/color/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
+                    f"{d435}/color/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+                    f"/{namespace}/mid360/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
+                ],
+                remappings=[
+                    (f"{d435}/depth/color", f"{d435}/depth/image_raw"),
+                    (f"/{namespace}/mid360/points", f"/{namespace}/mid360_PointCloud2"),
+                ],
+            )
+        else:
+            spawn_entity_node = Node(
+                package="gazebo_ros",
+                executable="spawn_entity.py",
+                name="spawn_entity",
+                namespace=namespace,
+                parameters=[
+                    {
+                        "use_sim_time": False,
+                    }
+                ],
+                arguments=[
+                    "-topic",
+                    "robot_description",
+                    "-entity",
+                    namespace,
+                    "-x",
+                    x,
+                    "-y",
+                    y,
+                    "-z",
+                    z,
+                    "-Y",
+                    yaw,
+                ],
+            )
 
         # Create an obstacle tracker node
         obstacle_tracker_node = Node(
@@ -345,6 +423,7 @@ def generate_launch_description():
                     "start_pos": [float(x), float(y), float(z)],
                     "start_yaw": float(yaw),
                     "send_state_to_gazebo": parameters["sim_env"] == "gazebo",
+                    "gazebo_backend": backend,
                     "visual_level": parameters["visual_level"],
                     "publish_odom": publish_odom,
                     "odom_topic": odom_topic,
@@ -394,9 +473,28 @@ def generate_launch_description():
             if parameters["sim_env"] == "gazebo":
                 nodes_to_start.append(robot_state_publisher_node)
                 nodes_to_start.append(spawn_entity_node)
+                if backend == "gz":
+                    nodes_to_start.append(gz_bridge_node)
             elif parameters["sim_env"] == "fake_sim":
                 nodes_to_start.append(pcl_render_node)
         nodes_to_start.append(obstacle_tracker_node) if use_obstacle_tracker else None
+        if web:
+            nodes_to_start.append(
+                Node(
+                    package="sando",
+                    executable="sando_web.py",
+                    name="sando_web",
+                    namespace=namespace,
+                    output="screen",
+                    parameters=[
+                        {
+                            "namespace": namespace,
+                            "port": web_port,
+                            "default_goal_z": float(parameters.get("default_goal_z", 3.0)),
+                        }
+                    ],
+                )
+            )
 
         return nodes_to_start
 
@@ -411,6 +509,9 @@ def generate_launch_description():
             use_obstacle_tracker_arg,
             data_file_arg,
             global_planner_arg,
+            solver_arg,
+            web_arg,
+            web_port_arg,
             use_benchmark_arg,
             use_hardware_arg,
             use_onboard_localization_arg,

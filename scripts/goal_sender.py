@@ -43,7 +43,16 @@ class GoalSender(Node):
             )
 
         # Send the goals (publish a few times to ensure delivery, then stop)
-        sleep(1)  # wait for subscribers to connect
+        # Wait for the planners to subscribe: term_goal is volatile, so goals published before
+        # discovery completes are lost (a fixed 1 s wait is not always enough)
+        for _ in range(300):
+            if all(pub.get_subscription_count() > 0 for pub in self.pub_goals.values()):
+                break
+            sleep(0.1)
+        else:
+            missing = [a for a, pub in self.pub_goals.items() if pub.get_subscription_count() == 0]
+            self.get_logger().warn(f"No subscriber on term_goal for {missing}, sending anyway")
+        sleep(1)  # let the matched subscriptions finish connecting
         for _ in range(3):
             for agent, goal in zip(self.list_agents, self.list_goals):
                 self.send_goal(agent, goal)

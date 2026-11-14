@@ -118,8 +118,9 @@ RUN source /opt/ros/humble/setup.bash && \
 # Parallelism is limited to avoid OOM kills on template-heavy files like
 # gazebo_ros_camera.cpp (which can use 3-4 GB RAM per compilation unit).
 # Override with --build-arg BUILD_JOBS=N if you have more RAM available.
-# SANDO uses HiGHS + SHOT by default; use --build-arg SANDO_USE_GUROBI=ON for Gurobi instead.
-ARG SANDO_USE_GUROBI=OFF
+# SANDO builds both solver backends (HiGHS + SHOT and Gurobi), chosen at launch with solver:=...;
+# use --build-arg SANDO_WITH_GUROBI=OFF to leave the Gurobi backend out.
+ARG SANDO_WITH_GUROBI=ON
 ENV MAKEFLAGS="-j${BUILD_JOBS}"
 WORKDIR ${SANDO_WS}
 RUN source /opt/ros/humble/setup.bash && \
@@ -130,7 +131,7 @@ RUN source /opt/ros/humble/setup.bash && \
     source ${SANDO_WS}/install/setup.bash && \
     colcon build --packages-ignore ros2_livox_simulation \
                  --parallel-workers ${BUILD_JOBS} \
-                 --cmake-args -DCMAKE_BUILD_TYPE=Release -DSANDO_USE_GUROBI=${SANDO_USE_GUROBI}
+                 --cmake-args -DCMAKE_BUILD_TYPE=Release -DSANDO_WITH_GUROBI=${SANDO_WITH_GUROBI}
 RUN source /opt/ros/humble/setup.bash && \
     source ${SANDO_WS}/install/setup.bash && \
     source ${LIVOX_WS}/install/setup.bash && \

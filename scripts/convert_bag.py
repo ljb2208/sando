@@ -110,7 +110,7 @@ def main():
 
     # Open reader
     reader = SequentialReader()
-    storage_opts = StorageOptions(uri=str(input_path), storage_id="sqlite3")
+    storage_opts = StorageOptions(uri=str(input_path), storage_id="")
     converter_opts = ConverterOptions(
         input_serialization_format="cdr",
         output_serialization_format="cdr",

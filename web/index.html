@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SANDO Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.min.js" } }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SANDO <span id="agent" class="muted">—</span></div>
+    <div id="status" class="status status-unknown" role="status">
+      <span class="dot" aria-hidden="true"></span><span id="status-text">Waiting for SANDO</span>
+    </div>
+    <div id="conn" class="conn">connecting…</div>
+  </header>
+
+  <main class="layout">
+    <section class="viewport card" aria-label="3D view">
+      <div id="scene"></div>
+      <details class="overlay layers" id="layers" open>
+        <summary class="overlay-title">Layers</summary>
+        <div id="layer-list"></div>
+        <label class="row"><input type="checkbox" id="follow" checked> Follow vehicle</label>
+        <button id="reset-view" type="button">Reset view</button>
+      </details>
+      <form id="goal-form" class="overlay goal" autocomplete="off">
+        <div class="overlay-title">Send goal</div>
+        <div class="goal-inputs">
+          <label>x <input name="x" type="number" step="0.1" required></label>
+          <label>y <input name="y" type="number" step="0.1" required></label>
+          <label>z <input name="z" type="number" step="0.1"></label>
+        </div>
+        <button type="submit">Send</button>
+        <div class="hint">or Shift+click the ground</div>
+      </form>
+      <div id="toast" class="toast" hidden></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <h2>Vehicle</h2>
+        <div class="tiles" id="vehicle-tiles"></div>
+      </section>
+
+      <section class="card">
+        <h2>Replanning <span class="muted small">last 100 replans</span></h2>
+        <div class="tiles" id="perf-tiles"></div>
+        <div class="chart-head">
+          <h3>Replan time (ms), last 60 s</h3>
+          <div id="legend" class="legend"></div>
+        </div>
+        <div class="chart" id="chart-wrap">
+          <canvas id="chart"></canvas>
+          <div id="tooltip" class="tooltip" hidden></div>
+        </div>
+        <details>
+          <summary>Timing breakdown</summary>
+          <table class="table" id="timing-table"></table>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>Parameters <span id="param-node" class="muted small"></span></h2>
+        <div class="param-tools">
+          <input id="param-filter" type="search" placeholder="Filter parameters">
+          <button id="param-refresh" type="button">Refresh</button>
+        </div>
+        <div id="param-msg" class="small muted"></div>
+        <h3>Live <span class="muted small">applied between replans</span></h3>
+        <table class="table params" id="params-live"></table>
+        <details>
+          <summary>Startup only <span class="muted small">(restart SANDO to change)</span></summary>
+          <table class="table params" id="params-static"></table>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>Events</h2>
+        <ol id="events" class="events"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

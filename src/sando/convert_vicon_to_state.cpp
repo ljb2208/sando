@@ -18,8 +18,11 @@ PoseTwistToStateNode::PoseTwistToStateNode() : Node("pose_twist_to_state_node") 
   custom_qos_profile.durability =
       rmw_qos_durability_policy_t::RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL;
 
-  sub_pose_.subscribe(this, "world", custom_qos_profile);
-  sub_twist_.subscribe(this, "twist", custom_qos_profile);
+  // Passed as rclcpp::QoS: message_filters drops the reliability and durability of an
+  // rmw_qos_profile_t (QoSInitialization::from_rmw() keeps only the history)
+  const rclcpp::QoS qos(rclcpp::QoSInitialization::from_rmw(custom_qos_profile), custom_qos_profile);
+  sub_pose_.subscribe(this, "world", qos);
+  sub_twist_.subscribe(this, "twist", qos);
 
   // Time synchronizer setup
   pose_twist_sync_.reset(new Sync(MySyncPolicy(10), sub_pose_, sub_twist_));

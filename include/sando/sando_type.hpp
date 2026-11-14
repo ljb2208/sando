@@ -48,6 +48,9 @@ struct Parameters {
   // Visual level
   int visual_level;
 
+  // Trajectory optimization backend: "auto", "highs_shot" or "gurobi" (see solver.hpp)
+  std::string solver{"auto"};
+
   // Global planner parameters
   std::string global_planner;
   bool global_planner_verbose;

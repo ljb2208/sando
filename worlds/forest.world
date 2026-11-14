@@ -38,6 +38,8 @@
               <size>100 100</size>
             </plane>
           </geometry>
+          <surface>
+            <contact>
               <collide_bitmask>65535</collide_bitmask>
               <ode/>
             </contact>

@@ -217,6 +217,12 @@ class SANDO {
    */
   void changeDroneStatus(int new_status);
 
+  /** @brief Apply the parameters that can change while flying (see SANDO_NODE's live parameter
+   *  list): copies them into par_ and rebuilds the trajectory solvers with them. Call it between
+   *  replans only (from the replanning thread), never while a solve runs.
+   */
+  void updateLiveParameters(const Parameters& par);
+
   /** @brief Computes the desired yaw angle and rate for the next goal based on drone status.
    *  @param next_goal Goal state to update with computed yaw and dyaw.
    */
@@ -257,6 +263,11 @@ class SANDO {
    *  @return DroneStatus integer value.
    */
   int getDroneStatus() const { return drone_status_; }
+
+  /** @brief Whether the last replan() call planned (true) or was skipped (false): not ready, no
+   *  replan needed near the goal, idle while hovering, ... A skipped replan is not a failure.
+   */
+  bool lastReplanAttempted() const { return last_replan_attempted_; }
 
   /** @brief Returns the distance trigger threshold for hover avoidance.
    *  @return Trigger distance in meters.
@@ -502,6 +513,8 @@ class SANDO {
   double max_dist_vertexes_;                     // Maximum velocity
   std::vector<double> factors_;                  // Factors for time allocation
   int num_dynamic_factors_;
+  bool last_replan_attempted_ = false;  // See lastReplanAttempted()
+  int grb_threads_per_solver_ = 1;  // Solver threads per factor (kept to rebuild the solvers)
   bool dynamic_factor_inital_sucess_ = false;
   double worst_traj_time_ = 0.0;  // Worst case trajectory time for pre-computation
   double traj_max_time_ = 0.0;    // Maximum trajectory time for map update

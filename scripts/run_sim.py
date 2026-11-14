@@ -51,6 +51,23 @@ from pathlib import Path
 # Source rviz config (not the install copy)
 RVIZ_CONFIG = Path(__file__).resolve().parent.parent / "rviz" / "sando.rviz"
 
+# ROS distro of the shell running this script. Gazebo Classic (gazebo_ros) only exists up to
+# Humble; later distros use Gazebo Sim ("gz"), like base_sando.launch.py
+ROS_DISTRO = os.environ.get("ROS_DISTRO", "humble")
+# "solver:=<name> " for onboard_sando.launch.py when --solver is given (set in main())
+SOLVER_LAUNCH_ARG = ""
+# Port of the SANDO web interface when --web is given (set in main()); None: no web interface
+WEB_PORT = None
+
+
+def web_arg(namespace):
+    """onboard_sando.launch.py arguments starting the web interface, for the first agent only."""
+    return f"web:=true web_port:={WEB_PORT} " if WEB_PORT and namespace == "NX01" else ""
+
+GAZEBO_BACKEND = (
+    "classic" if os.path.isdir(f"/opt/ros/{ROS_DISTRO}/share/gazebo_ros") else "gz"
+)
+
 
 def find_setup_bash(args_setup_bash: str = None) -> Path:
     """Find setup.bash path. Requires explicit --setup-bash argument."""
@@ -79,10 +96,23 @@ def workspace_source_commands(ros_domain_id: int) -> list:
     Clears stale ROS/colcon environment from .bashrc before sourcing the target
     workspace, preventing library conflicts when multiple workspaces are installed.
     """
+    # Search-path variables that ROS distros and colcon workspaces prepend to. Sourcing a setup
+    # file does not remove another distro's entries (e.g. a workspace built on Jazzy, sourced
+    # from .bashrc, chains /opt/ros/jazzy), which would then shadow the target distro's
+    # libraries and executables. Conda is dropped too: its python3 cannot load ROS's rclpy
+    path_vars = ("PATH LD_LIBRARY_PATH PYTHONPATH PKG_CONFIG_PATH GZ_SIM_SYSTEM_PLUGIN_PATH "
+                 "GZ_SIM_RESOURCE_PATH GZ_GUI_PLUGIN_PATH GZ_CONFIG_PATH")
+    strip_ros_paths = (
+        '_sando_strip() { local o="" p; local IFS=:; for p in ${!1}; do case "$p" in '
+        '/opt/ros/*|*/install|*/install/*|*conda*) ;; *) o="${o:+$o:}$p" ;; esac; done; '
+        'export "$1=$o"; }; '
+        f'for _v in {path_vars}; do _sando_strip $_v; done; unset -f _sando_strip; unset _v'
+    )
     return [
         # Reset ROS overlay so only the target workspace is active
-        'unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH 2>/dev/null',
-        'source /opt/ros/humble/setup.bash',
+        'unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH AMENT_CURRENT_PREFIX CONDA_PREFIX 2>/dev/null',
+        strip_ros_paths,
+        f"source /opt/ros/{ROS_DISTRO}/setup.bash",
         '. "$SETUP_BASH"',
         f"export ROS_DOMAIN_ID={ros_domain_id}",
     ]
@@ -129,7 +159,7 @@ def generate_multiagent_yaml(
             {
                 "shell_command": [
                     "sleep 10",
-                    f"ros2 launch sando onboard_sando.launch.py namespace:={agent['namespace']} "
+                    f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg(agent['namespace'])}namespace:={agent['namespace']} "
                     f"x:={agent['x']} y:={agent['y']} z:={agent['z']} yaw:={agent['yaw']} "
                     f"publish_odom:=true odom_topic:=odom",
                 ]
@@ -212,7 +242,7 @@ def generate_rviz_only_yaml(
         {
             "shell_command": [
                 "sleep 3",
-                f"ros2 launch sando onboard_sando.launch.py namespace:=NX01 "
+                f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg('NX01')}namespace:=NX01 "
                 f"x:={start_x} y:={start_y} z:={start_z} yaw:={start_yaw} "
                 f"sim_env:=rviz_only "
                 f"publish_odom:=true "
@@ -386,15 +416,24 @@ def _generate_obstacle_json(
 
 
 def _inject_world_plugin(base_world_path: str, json_path: str, output_path: str):
-    """Read a .world file and inject the dynamic obstacles world plugin."""
+    """Read a world file and inject the dynamic obstacles world plugin (Classic) or system (gz)."""
     with open(base_world_path) as f:
         content = f.read()
 
-    plugin_xml = (
-        f'\n    <plugin name="dyn_obs" filename="libdynamic_obstacles_world_plugin.so">'
-        f"\n      <json_path>{json_path}</json_path>"
-        f"\n    </plugin>\n  "
-    )
+    if GAZEBO_BACKEND == "gz":
+        # Sim time: dynamic_forest_node runs with use_sim_time:=true on the bridged /clock
+        plugin_xml = (
+            '\n    <plugin filename="sando_gz_dynamic_obstacles" name="sando::DynamicObstacles">'
+            f"\n      <json_path>{json_path}</json_path>"
+            "\n      <time_source>sim</time_source>"
+            "\n    </plugin>\n  "
+        )
+    else:
+        plugin_xml = (
+            f'\n    <plugin name="dyn_obs" filename="libdynamic_obstacles_world_plugin.so">'
+            f"\n      <json_path>{json_path}</json_path>"
+            f"\n    </plugin>\n  "
+        )
     content = content.replace("</world>", plugin_xml + "</world>")
 
     with open(output_path, "w") as f:
@@ -476,8 +515,14 @@ def generate_gazebo_dynamic_yaml(
         }
         world_file = env_to_world.get(env, f"{env}.world")
         install_dir = setup_bash.resolve().parent
-        base_world = install_dir / "sando" / "share" / "sando" / "worlds" / world_file
-        temp_world = "/tmp/sando_world.world"
+        worlds_dir = install_dir / "sando" / "share" / "sando" / "worlds"
+        if GAZEBO_BACKEND == "gz":
+            # Gazebo Sim worlds live in worlds/gz/<name>.sdf
+            base_world = worlds_dir / "gz" / (Path(world_file).stem + ".sdf")
+            temp_world = "/tmp/sando_world.sdf"
+        else:
+            base_world = worlds_dir / world_file
+            temp_world = "/tmp/sando_world.world"
         _inject_world_plugin(str(base_world), json_path, temp_world)
 
         panes = [
@@ -559,7 +604,7 @@ def generate_gazebo_dynamic_yaml(
             {
                 "shell_command": [
                     "sleep 10",
-                    f"ros2 launch sando onboard_sando.launch.py namespace:=NX01 "
+                    f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg('NX01')}namespace:=NX01 "
                     f"x:={start_x} y:={start_y} z:={start_z} yaw:={start_yaw} "
                     + ("use_benchmark:=true " if use_benchmark else "")
                     + (f"data_file:={data_file} " if data_file else "")
@@ -684,7 +729,7 @@ def generate_hover_test_yaml(
         {
             "shell_command": [
                 "sleep 3",
-                f"ros2 launch sando onboard_sando.launch.py namespace:=NX01 "
+                f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg('NX01')}namespace:=NX01 "
                 f"x:={start_x} y:={start_y} z:={start_z} "
                 f"sim_env:=rviz_only "
                 f"publish_odom:=true "
@@ -756,7 +801,7 @@ def generate_adversarial_test_yaml(
         {
             "shell_command": [
                 "sleep 2",
-                f"ros2 launch sando onboard_sando.launch.py namespace:=NX01 "
+                f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg('NX01')}namespace:=NX01 "
                 f"x:={ex} y:={ey} z:={ez} "
                 f"sim_env:=rviz_only "
                 f"publish_odom:=true "
@@ -771,7 +816,7 @@ def generate_adversarial_test_yaml(
         {
             "shell_command": [
                 "sleep 2",
-                f"ros2 launch sando onboard_sando.launch.py namespace:=NX02 "
+                f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}namespace:=NX02 "
                 f"x:={cx} y:={cy} z:={cz} "
                 f"sim_env:=rviz_only "
                 f"publish_odom:=true "
@@ -886,7 +931,7 @@ def generate_gazebo_yaml(
         {
             "shell_command": [
                 "sleep 10",
-                f"ros2 launch sando onboard_sando.launch.py namespace:=NX01 x:={start_x} y:={start_y} z:={start_z} yaw:={start_yaw} "
+                f"ros2 launch sando onboard_sando.launch.py {SOLVER_LAUNCH_ARG}{web_arg('NX01')}namespace:=NX01 x:={start_x} y:={start_y} z:={start_z} yaw:={start_yaw} "
                 + (
                     f"environment_assumption:={environment_assumption} "
                     if environment_assumption
@@ -1604,6 +1649,22 @@ def main():
     )
 
     parser.add_argument(
+        "--solver",
+        type=str,
+        choices=["auto", "highs_shot", "gurobi"],
+        default=None,
+        help="Trajectory optimization backend (default: the 'solver' parameter of config/sando.yaml)",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Start the SANDO web interface for NX01 (open http://localhost:<web-port>)",
+    )
+    parser.add_argument(
+        "--web-port", type=int, default=8080, help="Port of the web interface (default: 8080)"
+    )
+
+    parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
@@ -1630,6 +1691,13 @@ def main():
     )
 
     args = parser.parse_args()
+
+    global SOLVER_LAUNCH_ARG, WEB_PORT
+    if args.solver:
+        SOLVER_LAUNCH_ARG = f"solver:={args.solver} "
+    if args.web:
+        WEB_PORT = args.web_port
+        print(f"[INFO] Web interface: http://localhost:{WEB_PORT}")
 
     # Find setup.bash path
     setup_bash = find_setup_bash(args.setup_bash)

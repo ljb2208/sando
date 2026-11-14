@@ -42,6 +42,7 @@ sando_node:
         drone_bbox: [0.2, 0.2, 0.2]                     # [m] Vehicle bounding box (include prop guards for hardware)
 
         # --- Trajectory Optimization ---
+        solver: "auto"                                  # ["auto", "highs_shot", "gurobi"] auto: Gurobi if built, else HiGHS+SHOT
         num_P: 3                                        # [-] Number of polytopes (more = smoother but slower, num_P <= num_N)
         num_N: 5                                        # [-] Number of trajectory segments
 

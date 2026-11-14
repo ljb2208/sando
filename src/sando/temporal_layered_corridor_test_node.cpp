@@ -272,6 +272,9 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
     declare_parameter<std::vector<double>>("start", {-4.0, 0.0, 1.0});
     declare_parameter<std::vector<double>>("goal", {4.0, 0.0, 1.0});
 
+    // Trajectory optimization backend: auto, highs_shot or gurobi
+    declare_parameter<std::string>("solver", "auto");
+
     // Spatial corridor pieces (global segments) and time layers (local segments)
     declare_parameter<int>("P_global", 3);
     declare_parameter<int>("N_local", 6);
@@ -368,6 +371,7 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
     fixed_layer_ = get_parameter("fixed_layer").as_int();
 
     // Build parameters struct used by both HGPManager and SandoSolver
+    par_.solver = get_parameter("solver").as_string();
     par_.num_N = N_local_;
     par_.dc = dc_;
 
@@ -551,7 +555,7 @@ class TemporalLayeredCorridorTestNode final : public rclcpp::Node {
 
   void solveTrajectory_() {
     // Solver setup
-    solver_ = std::make_shared<SandoSolver>();
+    solver_ = createTrajSolver(par_.solver);
     solver_->setPlannerName("SANDO");
     solver_->initializeSolver(par_);
     solver_->setT0(0.0);

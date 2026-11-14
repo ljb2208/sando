@@ -294,7 +294,7 @@ def recompute_metrics_from_bag(
         return default_result
 
     # Setup bag reader
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="sqlite3")
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="")
     converter_options = ConverterOptions(
         input_serialization_format="cdr", output_serialization_format="cdr"
     )
@@ -424,7 +424,7 @@ def recompute_violations_from_bag(
         return default_result
 
     # Setup bag reader
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="sqlite3")
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="")
     converter_options = ConverterOptions(
         input_serialization_format="cdr", output_serialization_format="cdr"
     )
@@ -509,7 +509,7 @@ def analyze_collision_from_bag(
     print(f"  Analyzing collision from bag: {bag_path.name}")
 
     # Setup bag reader
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="sqlite3")
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="")
     converter_options = ConverterOptions(
         input_serialization_format="cdr", output_serialization_format="cdr"
     )
@@ -731,7 +731,7 @@ def analyze_collision_from_trajs_bag(
     print(f"  Analyzing collision from bag (trajs): {bag_path.name}")
 
     # Setup bag reader
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="sqlite3")
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="")
     converter_options = ConverterOptions(
         input_serialization_format="cdr", output_serialization_format="cdr"
     )
@@ -925,7 +925,7 @@ def analyze_collision_from_static_obstacles(
     print(f"    Loaded {len(obstacles)} static obstacles from {obstacle_csv_path.name}")
 
     # Read drone trajectory from bag
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="sqlite3")
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="")
     converter_options = ConverterOptions(
         input_serialization_format="cdr", output_serialization_format="cdr"
     )

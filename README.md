@@ -271,7 +271,7 @@ grbgetkey YOUR_LICENSE_KEY   # saves license to ~/gurobi.lic
 
 > **Note:** The license is only needed to **run** SANDO, not to build it.
 
-> **Solver backend:** SANDO builds with the HiGHS + SHOT solver (`SolverHighsShot`) by default, which requires [HiGHS](https://github.com/ERGO-Code/HiGHS) and [SHOT](https://github.com/coin-or/SHOT) (built with HiGHS support) to be installed. To use Gurobi (`SolverGurobi`) instead, configure with `-DSANDO_USE_GUROBI=ON`, e.g. `colcon build --packages-select sando --cmake-args -DSANDO_USE_GUROBI=ON`. The setup script and Docker image install Gurobi and pass this option.
+> **Solver backends:** SANDO builds every trajectory solver backend it finds: HiGHS + SHOT (`SolverHighsShot`), which requires [HiGHS](https://github.com/ERGO-Code/HiGHS) and [SHOT](https://github.com/coin-or/SHOT) (built with HiGHS support), and Gurobi (`SolverGurobi`), found through `GUROBI_HOME` or in `/opt/gurobi*/linux64`. At least one is required; `-DSANDO_WITH_HIGHS_SHOT=OFF` or `-DSANDO_WITH_GUROBI=OFF` leaves one out. The backend is chosen when launching, with the `solver` parameter in `config/sando.yaml` or the launch argument, e.g. `ros2 launch sando onboard_sando.launch.py solver:=gurobi` or `python3 scripts/run_sim.py ... --solver gurobi`: `highs_shot`, `gurobi`, or `auto` (the default: Gurobi if built, else HiGHS + SHOT). Gurobi needs a license at runtime.
 
 **4. Run Simulations**
 
@@ -314,6 +314,29 @@ Hardware-specific config: `config/sando_hw_quadrotor.yaml` (with inline comments
 | `heat_alpha0` / `heat_alpha1` | 0.2 / 1.0 | Dynamic obstacle avoidance weights |
 
 </details>
+
+### Web Interface
+
+A browser view of one agent: planner status, replanning performance (rate, success, timing
+breakdown, live chart), parameters, and a 3D view of the planned trajectory, safe corridors,
+obstacles and goal, updated live. Goals can be sent from the page (form, or Shift+click the ground).
+
+```bash
+python3 scripts/run_sim.py --mode dynamic --web          # simulation, http://localhost:8080
+ros2 launch sando onboard_sando.launch.py web:=true web_port:=8080 ...   # with SANDO
+ros2 run sando sando_web.py --ros-args -p namespace:=NX01 -p port:=8080  # standalone
+```
+
+It uses only the Python standard library, numpy and ROS, and serves the page itself, so it can run
+on the onboard computer (open `http://<onboard-ip>:8080` from the ground station). It listens on
+all interfaces and has no authentication: use `-p read_only:=true` (no parameter changes or goals)
+or `-p host:=127.0.0.1` on shared networks.
+
+Parameters in `live_parameters` (`v_max`, `a_max`, `j_max`, `horizon`, `goal_radius`,
+`goal_seen_radius`, `w_max`, `w_max_yawing`, `jerk_smooth_weight`, `max_gurobi_comp_time_sec`,
+`visual_level`, `debug_verbose`) can be changed while flying, from the page or with
+`ros2 param set /NX01/sando_node v_max 3.0`; they are applied between replans. The others are read at
+startup and SANDO rejects changes to them.
 
 <details>
 <summary><b>Benchmarking</b></summary>

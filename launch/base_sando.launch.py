@@ -12,7 +12,7 @@
 import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch.actions import (
     IncludeLaunchDescription,
     DeclareLaunchArgument,
@@ -21,6 +21,33 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
+
+
+def gazebo_backend():
+    """Gazebo Classic ("classic") when gazebo_ros is installed (Humble), else Gazebo Sim ("gz")."""
+    try:
+        get_package_share_directory("gazebo_ros")
+        return "classic"
+    except PackageNotFoundError:
+        return "gz"
+
+
+# Obstacles JSON shared between dyn_obstacles.launch.py (writer) and the gz DynamicObstacles system
+GZ_OBSTACLES_JSON = "/tmp/sando_gz_obstacles.json"
+
+
+def inject_gz_dynamic_obstacles(world_path, json_path, time_source, output_path):
+    """Write a copy of a gz world with the sando::DynamicObstacles system added."""
+    with open(world_path) as f:
+        content = f.read()
+    plugin_xml = (
+        '\n    <plugin filename="sando_gz_dynamic_obstacles" name="sando::DynamicObstacles">'
+        f"\n      <json_path>{json_path}</json_path>"
+        f"\n      <time_source>{time_source}</time_source>"
+        "\n    </plugin>\n  "
+    )
+    with open(output_path, "w") as f:
+        f.write(content.replace("</world>", plugin_xml + "</world>", 1))
 
 
 def convert_str_to_bool(str):
@@ -97,10 +124,26 @@ def generate_launch_description():
             "dynamic_forest": "dynamic_forest.world",
         }
 
+        backend = gazebo_backend()
+
         # Choose the world file: use world_file override if provided, else env mapping
         world_file_override = LaunchConfiguration("world_file").perform(context).strip()
         if world_file_override:
             world_path = world_file_override
+        elif backend == "gz":
+            # Gazebo Sim worlds live in worlds/gz/<name>.sdf
+            world_file = world_mapping.get(env_value, "easy_forest.world")
+            world_path = os.path.join(
+                get_package_share_directory("sando"),
+                "worlds",
+                "gz",
+                os.path.splitext(world_file)[0] + ".sdf",
+            )
+            if not os.path.exists(world_path):
+                raise RuntimeError(
+                    f"World '{world_file}' (env '{env_value}') has not been ported to Gazebo Sim "
+                    f"yet: {world_path} not found"
+                )
         else:
             world_file = world_mapping.get(env_value, "easy_forest.world")
             world_path = PathJoinSubstitution(
@@ -127,19 +170,57 @@ def generate_launch_description():
         )
 
         # Include Gazebo launch file
-        gazebo_launch = IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution(
-                    [FindPackageShare("gazebo_ros"), "launch", "gazebo.launch.py"]
+        gz_nodes = []
+        if backend == "gz":
+            if use_dyn_obs:
+                # The DynamicObstacles system spawns + moves the obstacles that
+                # dyn_obstacles.launch.py writes to GZ_OBSTACLES_JSON. Wall time matches
+                # dynamic_forest_node, which runs on the system clock here.
+                if os.path.exists(GZ_OBSTACLES_JSON):
+                    os.remove(GZ_OBSTACLES_JSON)
+                dyn_world = f"/tmp/sando_gz_world_{os.getpid()}.sdf"
+                inject_gz_dynamic_obstacles(world_path, GZ_OBSTACLES_JSON, "wall", dyn_world)
+                world_path = dyn_world
+
+            # -r: start running; -s: server only (no GUI)
+            gz_args = f"-r {'' if convert_str_to_bool(use_gazebo_gui) else '-s '}{world_path}"
+            gazebo_launch = IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [FindPackageShare("ros_gz_sim"), "launch", "gz_sim.launch.py"]
+                    )
+                ),
+                launch_arguments={"gz_args": gz_args, "on_exit_shutdown": "true"}.items(),
+            )
+
+            # Expose the world's set_pose service to ROS (used by fake_sim to move the agents)
+            # and the sim clock (for nodes run with use_sim_time:=true)
+            gz_nodes.append(
+                Node(
+                    package="ros_gz_bridge",
+                    executable="parameter_bridge",
+                    name="gz_world_bridge",
+                    output="log",
+                    arguments=[
+                        "/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose",
+                        "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                    ],
                 )
-            ),
-            launch_arguments={
-                "world": world_path,
-                "use_sim_time": "false",
-                "gui": use_gazebo_gui,
-                "enable_gpu": "true",
-            }.items(),
-        )
+            )
+        else:
+            gazebo_launch = IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [FindPackageShare("gazebo_ros"), "launch", "gazebo.launch.py"]
+                    )
+                ),
+                launch_arguments={
+                    "world": world_path,
+                    "use_sim_time": "false",
+                    "gui": use_gazebo_gui,
+                    "enable_gpu": "true",
+                }.items(),
+            )
 
         # Number of dynamic obstacles
         # num_dyn_obstacles = 100 if env_value in ["empty_wo_ground"] else 50
@@ -159,11 +240,13 @@ def generate_launch_description():
                 "launch_forest_node": "true",
                 "forest_start_delay": "2.0",
                 "spawn_interval": "1.0",
+                # On gz the obstacles are written to a JSON file for the DynamicObstacles system
+                "gz_obstacles_json": GZ_OBSTACLES_JSON if backend == "gz" else "",
             }.items(),
         )
 
         # Return launch description
-        nodes_to_start = [gazebo_launch]
+        nodes_to_start = [gazebo_launch] + gz_nodes
         nodes_to_start.append(rviz_node) if use_rviz else None
         nodes_to_start.append(dynamic_obstacles_launch) if use_dyn_obs else None
 
