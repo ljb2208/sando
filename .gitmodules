@@ -1,18 +1,21 @@
 [submodule "deps/DecompROS2"]
 	path = deps/DecompROS2
-	url = https://github.com/kotakondo/DecompROS2.git
+	url = git@github.com:ljb2208/DecompROS2.git
+	branch = sando-kilted
 [submodule "deps/dynus_interfaces"]
 	path = deps/dynus_interfaces
 	url = https://github.com/kotakondo/dynus_interfaces.git
 [submodule "deps/acl-mapping"]
 	path = deps/acl-mapping
-	url = https://gitlab.com/mit-acl/lab/acl-mapping.git
+	url = git@github.com:ljb2208/acl_mapping.git
+	branch = sando-kilted
 [submodule "deps/gazebo_ros_pkgs"]
 	path = deps/gazebo_ros_pkgs
 	url = https://github.com/kotakondo/gazebo_ros_pkgs.git
 [submodule "deps/uav_simulator"]
 	path = deps/uav_simulator
-	url = https://github.com/kotakondo/uav_simulator.git
+	url = git@github.com:ljb2208/uav_simulator.git
+	branch = sando-kilted
 [submodule "deps/livox_laser_simulation_ros2"]
 	path = deps/livox_laser_simulation_ros2
 	url = https://github.com/kotakondo/livox_laser_simulation_ros2.git
