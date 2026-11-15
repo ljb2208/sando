@@ -1,0 +1,62 @@
+# Ackermann-steered rover: overrides applied on top of sando.yaml (or sando_hw_quadrotor.yaml)
+# when launching with vehicle:=ackermann. Only the keys below change.
+#
+# The rover plans in the horizontal plane at ground_plane_z, forward only, with each trajectory
+# segment's velocity kept within ackermann_heading_cone_deg of a reference heading (from the
+# global path) and trajectories rejected when they turn tighter than the steering allows
+# (curvature tan(ackermann_max_steering_deg) / ackermann_wheelbase).
+sando_node:
+  ros__parameters:
+    vehicle_type: "ackermann"
+    skip_initial_yawing: true             # no turning on the spot
+    hover_avoidance_enabled: false        # no sideways dodging
+
+    # --- Rover geometry and steering ---
+    ackermann_wheelbase: 0.5              # [m]   front-to-rear axle distance
+    ackermann_max_steering_deg: 30.0      # [deg] min turning radius = wheelbase / tan(this) = 0.87 m
+    ackermann_heading_cone_deg: 35.0      # [deg] velocity within this angle of the segment heading
+    ackermann_max_lateral_accel: 2.0      # [m/s^2] acceleration across the heading
+    ackermann_curvature_check_speed: 0.3  # [m/s] curvature is checked above this speed
+    ackermann_curvature_tolerance: 0.15   # [-] accepted curvature excess before rejecting a plan
+    drone_bbox: [1.2, 1.2, 0.4]           # [m] obstacle inflation uses half of the first entry:
+                                          #     circle around the 0.8 m x 0.6 m footprint (radius
+                                          #     0.5 m) plus 0.1 m for tracking error
+
+    # --- Global path: Hybrid A* (heading-aware, respects the turning radius) ---
+    ackermann_global_planner: "hybrid_astar"  # "hybrid_astar", or "hgp" (SANDO's grid planner)
+    ackermann_allow_reverse: true         # reverse in paths and trajectories (stops at each change)
+    ackermann_footprint: [0.8, 0.6]       # [m] length, width (body and wheels; urdf/rover.urdf.xacro)
+    inflation_hgp: 0.1                    # [m] map safety margin (the footprint is checked
+                                          #     explicitly, so no vehicle-size inflation here)
+    hybrid_astar_step: 0.5                # [m] motion primitive length
+    hybrid_astar_max_expansions: 8000
+    hybrid_astar_reverse_penalty: 2.0     # cost factor for distance driven backward
+    hybrid_astar_switch_penalty: 3.0      # [m] cost of each forward/reverse change
+
+    # --- Evasion: escape moves when stopped and a moving obstacle is predicted to come close ---
+    ackermann_evasion_enabled: true
+    ackermann_evasion_horizon: 3.0        # [s] threat look-ahead
+    ackermann_evasion_margin: 0.3         # [m] clearance beyond the footprint circle to keep
+
+    # --- Planar planning band ---
+    # Obstacles between z_min and z_max (above the ground, up to above the rover) block it; the
+    # band is wide enough for the corridor inflation, with the plane in the middle
+    ground_plane_z: 0.8                   # [m] plane the rover plans in (its state is moved here)
+    z_min: 0.2                            # [m] below: ground (ignored)
+    z_max: 1.4                            # [m] above: overhangs the rover passes under (ignored)
+    force_goal_z: true
+    default_goal_z: 0.8                   # [m] = ground_plane_z
+
+    # --- Dynamic limits (rover scale) ---
+    v_max: 2.0                            # [m/s]
+    a_max: 2.0                            # [m/s^2]
+    j_max: 10.0                           # [m/s^3]
+    w_max: 2.0                            # [rad/s]
+
+    # --- Planning ---
+    # obst_max_vel (sando.yaml: 0.5 m/s): the corridors inflate every obstacle by this speed times
+    # the plan time, which grows quickly for a slow rover. Set it to the real top speed of the
+    # obstacles for safety (e.g. 1.5 for pedestrians); in the dense dynamic demo (obstacles up to
+    # 1.8 m/s) higher values remove contacts at speed but the rover then often cannot find plans.
+    horizon: 10.0                         # [m]
+    factor_final: 4.0                     # [-] slower time allocations help tight turns

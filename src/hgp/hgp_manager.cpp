@@ -627,7 +627,9 @@ void HGPManager::obstacle_to_vec(
   // voxels). Dynamic obstacles are provided separately in obst_pos.
 
   const double res = par_.factor_hgp * par_.res;
-  const double r = par_.obst_max_vel * traj_max_time +
+  // Ground vehicles in an environment assumed static: no motion inflation (see findSafeSubGoal)
+  const bool static_ground = par_.isAckermann() && par_.environment_assumption == "static";
+  const double r = (static_ground ? 0.0 : par_.obst_max_vel * traj_max_time) +
                    par_.obst_position_error;  // [m] motion + estimation error
 
   if (!(r > 0.0) || !(res > 0.0)) return;

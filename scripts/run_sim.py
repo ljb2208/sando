@@ -49,12 +49,14 @@ from pathlib import Path
 
 
 # Source rviz config (not the install copy)
-RVIZ_CONFIG = Path(__file__).resolve().parent.parent / "rviz" / "sando.rviz"
+SANDO_ROOT = Path(__file__).resolve().parent.parent
+RVIZ_CONFIG = SANDO_ROOT / "rviz" / "sando.rviz"
 
 # ROS distro of the shell running this script. Gazebo Classic (gazebo_ros) only exists up to
 # Humble; later distros use Gazebo Sim ("gz"), like base_sando.launch.py
 ROS_DISTRO = os.environ.get("ROS_DISTRO", "humble")
-# "solver:=<name> " for onboard_sando.launch.py when --solver is given (set in main())
+# Extra onboard_sando.launch.py arguments for every agent: "solver:=<name> " (--solver) and
+# "vehicle:=ackermann " (--vehicle) (set in main())
 SOLVER_LAUNCH_ARG = ""
 # Port of the SANDO web interface when --web is given (set in main()); None: no web interface
 WEB_PORT = None
@@ -897,6 +899,7 @@ def generate_gazebo_yaml(
 
     # Default environment assumption based on env type
     static_envs = {"easy_forest", "medium_forest", "hard_forest"}
+    static_envs |= {f"rover_{e}" for e in static_envs}
     if not environment_assumption:
         environment_assumption = "static" if env in static_envs else "dynamic"
 
@@ -915,7 +918,9 @@ def generate_gazebo_yaml(
     if use_mapper:
         static_envs = {"easy_forest", "medium_forest", "hard_forest"}
         param_file = (
-            "static_global_mapper.yaml" if env in static_envs else "global_mapper.yaml"
+            "rover_global_mapper.yaml"  # ground vehicles: map around the ground
+            if env.startswith("rover_")
+            else "static_global_mapper.yaml" if env in static_envs else "global_mapper.yaml"
         )
         panes.append(
             {
@@ -1656,6 +1661,13 @@ def main():
         help="Trajectory optimization backend (default: the 'solver' parameter of config/sando.yaml)",
     )
     parser.add_argument(
+        "--vehicle",
+        choices=["uav", "ackermann"],
+        default="uav",
+        help="Vehicle: uav, or ackermann (rover planning in a plane at ground_plane_z, "
+        "config/sando_ackermann.yaml) (default: uav)",
+    )
+    parser.add_argument(
         "--web",
         action="store_true",
         help="Start the SANDO web interface for NX01 (open http://localhost:<web-port>)",
@@ -1695,6 +1707,9 @@ def main():
     global SOLVER_LAUNCH_ARG, WEB_PORT
     if args.solver:
         SOLVER_LAUNCH_ARG = f"solver:={args.solver} "
+    if args.vehicle != "uav":
+        SOLVER_LAUNCH_ARG += f"vehicle:={args.vehicle} "
+        print(f"[INFO] Vehicle: {args.vehicle}")
     if args.web:
         WEB_PORT = args.web_port
         print(f"[INFO] Web interface: http://localhost:{WEB_PORT}")
@@ -1752,6 +1767,15 @@ def main():
         print(
             f"[INFO] Demo: unknown_dynamic {args.difficulty} ({args.num_obstacles} obstacles)"
         )
+
+    # Rover in Gazebo: the ground-contact variant of the forest worlds
+    if args.vehicle == "ackermann" and args.mode == "gazebo" and not args.env.startswith("rover_"):
+        rover_env = f"rover_{args.env}"
+        if (SANDO_ROOT / "worlds" / "gz" / f"{rover_env}.sdf").exists():
+            args.env = rover_env
+        else:
+            print(f"[WARN] No ground-vehicle world for '{args.env}' (wheels need ground contact)")
+        print(f"[INFO] Rover world: {args.env}")
 
     # Determine sim_env and generate YAML
     if args.mode == "multiagent":

@@ -8,6 +8,7 @@
 
 #include "sando/sando.hpp"
 #include <chrono>
+#include <unordered_set>
 #include <fstream>
 
 using namespace sando;
@@ -261,6 +262,7 @@ bool SANDO::findAandAtime(
     // Get A
     mtx_plan_.lock();
     A = plan_[plan_size - 1 - k_value_];
+    if (par_.isAckermann()) A.yaw = headingAtPlanIndex(plan_size - 1 - k_value_);
     mtx_plan_.unlock();
 
     // Get A_time
@@ -322,7 +324,11 @@ void SANDO::findSafeSubGoal(vec_Vecf<3>& global_path) {
   const double sample_dist = 0.1;  // [m] distance between two samples along the trajectory
 
   // Inflation radius for unknown space (max extent)
-  const double r_inflate = par_.obst_max_vel * traj_max_time_;  // [m]
+  // Unknown space may hide obstacles moving at obst_max_vel, hence the inflation. A ground vehicle
+  // in an environment assumed static skips it: its slow trajectories make it several metres, so
+  // the subgoal would stay at the start whenever any unknown space (occluded, out of view) is near
+  const bool static_ground = par_.isAckermann() && par_.environment_assumption == "static";
+  const double r_inflate = static_ground ? 0.0 : par_.obst_max_vel * traj_max_time_;  // [m]
   const double thr_orig = par_.drone_radius;                    // [m]
   const double thr_infl = par_.drone_radius + r_inflate;        // [m]
   const double thr_orig2 = thr_orig * thr_orig;
@@ -616,6 +622,27 @@ std::tuple<bool, bool> SANDO::replan(double last_replaning_computation_time, dou
   resetData();
   last_replan_attempted_ = false;
 
+  // Ackermann evasion: while an escape move is driven, do not replan; when it is done, resume
+  // (heading back to the goal if the rover was parked there)
+  if (par_.isAckermann() && par_.ackermann_evasion_enabled && state_initialized_) {
+    if (evasion_active_) {
+      size_t remaining;
+      {
+        std::lock_guard<std::mutex> lk(mtx_plan_);
+        remaining = plan_.size();
+      }
+      if (remaining > 1) return std::make_tuple(false, false);
+      evasion_active_ = false;
+      RobotState st, g_term;
+      getState(st);
+      getGterm(g_term);
+      if (drone_status_ == DroneStatus::GOAL_REACHED && terminal_goal_initialized_ &&
+          (st.pos - g_term.pos).head<2>().norm() > par_.goal_radius)
+        changeDroneStatus(DroneStatus::TRAVELING);
+    }
+    if (checkGroundEvasion(current_time)) return std::make_tuple(false, false);
+  }
+
   // Check if we need to replan
   if (!checkReadyToReplan()) {
     std::cout << bold << red << "Planner is not ready to replan" << reset << std::endl;
@@ -748,8 +775,8 @@ bool SANDO::generateGlobalPath(
 
   // if using ground robot, we fix the z
   if (par_.vehicle_type != "uav") {
-    local_A.pos[2] = 1.0;
-    local_G.pos[2] = 1.0;
+    local_A.pos[2] = par_.ground_plane_z;
+    local_G.pos[2] = par_.ground_plane_z;
   }
 
   // 1) Build a direction hint from the *previous* global path
@@ -777,7 +804,18 @@ bool SANDO::generateGlobalPath(
 
   // Solve HGP
   vec_Vecf<3> raw_global_path;
-  if (!hgp_manager_.solveHGP(
+  const bool use_hybrid_astar =
+      par_.isAckermann() && par_.ackermann_global_planner == "hybrid_astar";
+  ackermann_leg_.clear();
+  ackermann_leg_reverse_ = false;
+  if (use_hybrid_astar) {
+    if (!planHybridAStar(local_A, local_G, global_path)) {
+      hgp_failure_count_++;
+      replanning_failure_count_++;
+      return false;
+    }
+    raw_global_path = global_path;
+  } else if (!hgp_manager_.solveHGP(
           local_A.pos, start_dir_hint, local_G.pos, final_g_, par_.global_planner_heuristic_weight,
           A_time, global_path, raw_global_path)) {
     if (par_.debug_verbose)
@@ -840,6 +878,7 @@ bool SANDO::generateGlobalPath(
   hgp_manager_.getComputationTime(
       global_planning_time_, hgp_static_jps_time_, hgp_check_path_time_, hgp_dynamic_astar_time_,
       hgp_recover_path_time_);
+  if (use_hybrid_astar) global_planning_time_ = hybrid_astar_time_ms_;
 
   return true;
 }
@@ -880,8 +919,18 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
 
   // if using ground robot, we fix the z
   if (par_.vehicle_type != "uav") {
-    local_A.pos[2] = 1.0;
-    local_E.pos[2] = 1.0;
+    local_A.pos[2] = par_.ground_plane_z;
+    local_E.pos[2] = par_.ground_plane_z;
+  }
+
+  // Ackermann: planar initial/final states (the solver keeps z at the plane) and the heading of
+  // each segment for the heading-cone constraints
+  if (par_.isAckermann()) {
+    local_A.vel[2] = local_A.accel[2] = local_A.jerk[2] = 0.0;
+    local_E.vel[2] = local_E.accel[2] = local_E.jerk[2] = 0.0;
+    heading_refs_ = computeHeadingReferences(local_A, global_path);
+    planned_leg_reverse_ = ackermann_leg_reverse_;
+    planned_leg_start_yaw_ = local_A.yaw;
   }
 
   /*
@@ -1353,6 +1402,7 @@ bool SANDO::generateLocalTrajectory(
   }
   whole_traj_solver_ptr->setT0(A_time);             // Initial time (kept as-is)
   whole_traj_solver_ptr->setInitialDt(initial_dt);  // Initial dt
+  if (par_.isAckermann()) whole_traj_solver_ptr->setHeadingReference(heading_refs_);
 
   // Solve the optimization problem.
   bool gurobi_error_detected = false;
@@ -1371,6 +1421,432 @@ bool SANDO::generateLocalTrajectory(
     return false;
   }
 
+  // Ackermann: the heading cone and lateral acceleration bound the curvature only conservatively
+  // at speed; reject trajectories that turn tighter than the steering allows
+  if (par_.isAckermann() && !trajectoryCurvatureFeasible(whole_traj_solver_ptr)) return false;
+
+  return true;
+}
+
+// ----------------------------------------------------------------------------
+
+pcl::PointCloud<pcl::PointXYZ>::ConstPtr SANDO::toPlanningBand(
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud) const {
+  if (!par_.isAckermann() || !cloud) return cloud;
+  const double res = par_.res;
+  const int layers = std::max(1, static_cast<int>(std::ceil((par_.z_max - par_.z_min) / res)));
+  pcl::PointCloud<pcl::PointXYZ>::Ptr out(new pcl::PointCloud<pcl::PointXYZ>());
+  out->header = cloud->header;
+  std::unordered_set<int64_t> cells;  // one column per map cell
+  for (const auto& pt : cloud->points) {
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || pt.z < par_.z_min || pt.z > par_.z_max)
+      continue;
+    const int64_t ix = static_cast<int64_t>(std::floor(pt.x / res));
+    const int64_t iy = static_cast<int64_t>(std::floor(pt.y / res));
+    if (!cells.insert((ix << 32) ^ (iy & 0xffffffff)).second) continue;
+    for (int l = 0; l < layers; ++l)
+      out->points.emplace_back(pt.x, pt.y, static_cast<float>(par_.z_min + (l + 0.5) * res));
+  }
+  out->width = out->points.size();
+  out->height = 1;
+  out->is_dense = true;
+  return out;
+}
+
+bool SANDO::obstacleToPlanningBand(Eigen::Vector3d& pos, Eigen::Vector3d& bbox) const {
+  // Reaches the band when its vertical extent overlaps it (with a margin)
+  if (pos.z() - bbox.z() / 2.0 > par_.z_max + 0.25 || pos.z() + bbox.z() / 2.0 < par_.z_min - 0.25)
+    return false;
+  pos.z() = par_.ground_plane_z;
+  bbox.z() = std::max(bbox.z(), par_.z_max - par_.z_min);
+  return true;
+}
+
+double SANDO::headingAtPlanIndex(int idx) const {
+  if (plan_.empty()) return previous_yaw_;
+  return plan_[std::clamp(idx, 0, static_cast<int>(plan_.size()) - 1)].yaw;
+}
+
+void SANDO::annotateAckermannHeadings(std::vector<RobotState>& setpoints) const {
+  double heading = planned_leg_start_yaw_;
+  for (auto& sp : setpoints) {
+    const double vx = sp.vel[0], vy = sp.vel[1], v2 = vx * vx + vy * vy;
+    if (v2 > 0.05 * 0.05) {
+      heading = std::atan2(vy, vx) + (planned_leg_reverse_ ? M_PI : 0.0);
+      sando_utils::angle_wrap(heading);
+      sp.dyaw = (vx * sp.accel[1] - vy * sp.accel[0]) / v2;
+    } else {
+      sp.dyaw = 0.0;
+    }
+    sp.yaw = heading;
+  }
+}
+
+sando::HybridAStarMap SANDO::makePlanarMap(const std::shared_ptr<sando::VoxelMapUtil>& mu) const {
+  sando::HybridAStarMap map;
+  const double z = par_.ground_plane_z;
+  const Vecf<3> origin = mu->getOrigin();
+  const Veci<3> dim = mu->getDim();
+  map.x_min = origin.x();
+  map.y_min = origin.y();
+  map.res = mu->getRes();
+  map.nx = dim.x();
+  map.ny = dim.y();
+  map.occupied = [mu, z](double x, double y) { return mu->isOccupied(Vecf<3>(x, y, z)); };
+  map.unknown = [mu, z](double x, double y) { return mu->isUnknown(Vecf<3>(x, y, z)); };
+  return map;
+}
+
+double SANDO::evasionClearance(
+    double x, double y, double t_abs, const std::vector<std::shared_ptr<DynTraj>>& trajs) const {
+  const double r = 0.5 * std::hypot(par_.ackermann_footprint[0], par_.ackermann_footprint[1]);
+  double best = 1e9;
+  for (const auto& tr : trajs) {
+    if (!tr) continue;
+    Eigen::Vector3d q = tr->eval(t_abs), b = tr->bbox;
+    if (!std::isfinite(q.x()) || !std::isfinite(q.y()) || !std::isfinite(q.z())) continue;
+    if (!obstacleToPlanningBand(q, b)) continue;  // passes above or below the rover
+    const double dx = std::max(std::fabs(x - q.x()) - tr->bbox.x() / 2.0, 0.0);
+    const double dy = std::max(std::fabs(y - q.y()) - tr->bbox.y() / 2.0, 0.0);
+    best = std::min(best, std::hypot(dx, dy) - r);
+  }
+  return best;
+}
+
+bool SANDO::checkGroundEvasion(double current_time) {
+  RobotState st, front;
+  getState(st);
+  {
+    std::lock_guard<std::mutex> lk(mtx_plan_);
+    if (plan_.empty()) return false;
+    front = plan_.front();
+  }
+  // Only when stopped or slow: moving, the regular replanning handles obstacles
+  if (std::hypot(st.vel[0], st.vel[1]) > 0.3 || std::hypot(front.vel[0], front.vel[1]) > 0.3)
+    return false;
+  std::vector<std::shared_ptr<DynTraj>> trajs;
+  getTrajs(trajs);
+  if (trajs.empty()) return false;
+
+  const double H = par_.ackermann_evasion_horizon, dt = 0.1;
+  double stay = 1e9;
+  for (double t = 0.0; t <= H + 1e-9; t += dt)
+    stay = std::min(stay, evasionClearance(st.pos[0], st.pos[1], current_time + t, trajs));
+  if (stay >= par_.ackermann_evasion_margin) return false;
+
+  auto mu = hgp_manager_.getPlanningMapUtil();
+  if (!mu) mu = hgp_manager_.getMapUtilSharedPtr();
+  if (!mu) return false;
+  const sando::HybridAStarMap map = makePlanarMap(mu);
+  sando::HybridAStarConfig cfg;
+  cfg.wheelbase = par_.ackermann_wheelbase;
+  cfg.max_steer = par_.ackermann_max_steering_deg * M_PI / 180.0;
+  cfg.length = par_.ackermann_footprint[0];
+  cfg.width = par_.ackermann_footprint[1];
+  const sando::HybridAStar checker(cfg);
+
+  const double L = par_.ackermann_wheelbase;
+  const double acc = std::min(par_.a_max, 2.0), v_peak_max = std::min(par_.v_max, 1.5);
+  const double x0 = st.pos[0], y0 = st.pos[1], yaw0 = st.yaw;
+  // Pose after driving arc length s (signed by dir) with a fixed steering angle
+  auto pose_at = [&](double s, int dir, double kappa, double& x, double& y, double& yaw) {
+    const double d = dir * s;
+    if (std::fabs(kappa) < 1e-9) {
+      x = x0 + d * std::cos(yaw0);
+      y = y0 + d * std::sin(yaw0);
+      yaw = yaw0;
+    } else {
+      yaw = yaw0 + d * kappa;
+      x = x0 + (std::sin(yaw) - std::sin(yaw0)) / kappa;
+      y = y0 + (std::cos(yaw0) - std::cos(yaw)) / kappa;
+    }
+  };
+  // Trapezoidal speed profile over length S (stop at the end): distance, speed, acceleration
+  struct Profile {
+    double t_acc, t_cruise, v_peak, T;
+  };
+  auto make_profile = [&](double S) {
+    Profile p;
+    p.v_peak = std::min(v_peak_max, std::sqrt(acc * S));
+    p.t_acc = p.v_peak / acc;
+    p.t_cruise = std::max(0.0, (S - p.v_peak * p.t_acc) / p.v_peak);
+    p.T = 2.0 * p.t_acc + p.t_cruise;
+    return p;
+  };
+  auto profile_at = [&](const Profile& p, double t, double& s, double& v, double& a) {
+    if (t <= p.t_acc) {
+      v = acc * t, a = acc, s = 0.5 * acc * t * t;
+    } else if (t <= p.t_acc + p.t_cruise) {
+      v = p.v_peak, a = 0.0, s = 0.5 * p.v_peak * p.t_acc + p.v_peak * (t - p.t_acc);
+    } else {
+      const double td = std::min(t, p.T) - p.t_acc - p.t_cruise;
+      v = std::max(0.0, p.v_peak - acc * td), a = (t < p.T) ? -acc : 0.0;
+      s = 0.5 * p.v_peak * p.t_acc + p.v_peak * p.t_cruise + p.v_peak * td - 0.5 * acc * td * td;
+    }
+  };
+
+  double best_score = stay + 0.15;  // must clearly beat staying
+  int best_dir = 0;
+  double best_kappa = 0.0, best_S = 0.0;
+  const double max_kappa = std::tan(cfg.max_steer) / L;
+  for (int dir : {1, -1}) {
+    if (dir < 0 && !par_.ackermann_allow_reverse) continue;
+    for (double f : {0.0, 0.5, -0.5, 1.0, -1.0}) {
+      const double kappa = f * max_kappa;
+      for (double S : {1.5, 3.0}) {
+        // Static obstacles: footprint along the move
+        bool free = true;
+        for (double s = 0.1; s <= S + 1e-9 && free; s += 0.1) {
+          double x, y, yaw;
+          pose_at(s, dir, kappa, x, y, yaw);
+          free = checker.footprintFree(map, x, y, yaw);
+        }
+        if (!free) continue;
+        // Moving obstacles: predicted clearance while driving it and after stopping
+        const Profile prof = make_profile(S);
+        double clearance = 1e9;
+        for (double t = 0.0; t <= std::max(H, prof.T + 1.0) + 1e-9; t += dt) {
+          double s, v, a, x, y, yaw;
+          profile_at(prof, t, s, v, a);
+          pose_at(s, dir, kappa, x, y, yaw);
+          clearance = std::min(clearance, evasionClearance(x, y, current_time + t, trajs));
+        }
+        // Prefer forward and shorter moves when about equal
+        const double score = clearance - (dir < 0 ? 0.05 : 0.0) - 0.02 * S;
+        if (score > best_score) best_score = score, best_dir = dir, best_kappa = kappa, best_S = S;
+      }
+    }
+  }
+  if (best_dir == 0) {
+    if (par_.debug_verbose)
+      std::cout << "[evasion] threatened (clearance " << stay << " m) but no better move"
+                << std::endl;
+    return false;
+  }
+
+  // Drive it: setpoints every dc along the arc, ending at rest
+  const Profile prof = make_profile(best_S);
+  std::deque<RobotState> moves;
+  for (double t = 0.0;; t += par_.dc) {
+    const bool last = t >= prof.T;
+    double s, v, a, x, y, yaw;
+    profile_at(prof, std::min(t, prof.T), s, v, a);
+    pose_at(s, best_dir, best_kappa, x, y, yaw);
+    RobotState sp;
+    sp.setPos(x, y, par_.ground_plane_z);
+    const Eigen::Vector3d t_hat(std::cos(yaw), std::sin(yaw), 0.0);
+    const Eigen::Vector3d n_hat(-std::sin(yaw), std::cos(yaw), 0.0);
+    sp.vel = best_dir * v * t_hat;
+    sp.accel = best_dir * a * t_hat + best_kappa * v * v * n_hat;
+    sp.yaw = yaw;
+    sp.dyaw = best_dir * best_kappa * v;
+    if (last) sp.vel.setZero(), sp.accel.setZero(), sp.dyaw = 0.0;
+    moves.push_back(sp);
+    if (last) break;
+  }
+  {
+    std::lock_guard<std::mutex> lk(mtx_plan_);
+    plan_ = moves;
+  }
+  evasion_active_ = true;
+  ++evasion_count_;
+  std::cout << bold << yellow << "[evasion] #" << evasion_count_ << ": obstacle predicted within "
+            << stay << " m; driving " << (best_dir > 0 ? "forward" : "in reverse") << " " << best_S
+            << " m (steer " << std::atan(best_kappa * L) * 180.0 / M_PI
+            << " deg), predicted clearance " << best_score << " m" << reset << std::endl;
+  return true;
+}
+
+bool SANDO::planHybridAStar(const RobotState& A, const RobotState& G, vec_Vecf<3>& global_path) {
+  MyTimer timer(true);
+  auto mu = hgp_manager_.getPlanningMapUtil();
+  if (!mu) return false;
+  const double z = par_.ground_plane_z;
+
+  const sando::HybridAStarMap map = makePlanarMap(mu);
+
+  sando::HybridAStarConfig cfg;
+  cfg.wheelbase = par_.ackermann_wheelbase;
+  cfg.max_steer = par_.ackermann_max_steering_deg * M_PI / 180.0;
+  cfg.step = par_.hybrid_astar_step;
+  cfg.allow_reverse = par_.ackermann_allow_reverse;
+  cfg.reverse_penalty = par_.hybrid_astar_reverse_penalty;
+  cfg.switch_penalty = par_.hybrid_astar_switch_penalty;
+  cfg.max_expansions = par_.hybrid_astar_max_expansions;
+  cfg.goal_tolerance = std::max(0.5, 2.0 * map.res);
+  cfg.length = par_.ackermann_footprint[0];
+  cfg.width = par_.ackermann_footprint[1];
+
+  // A vehicle already moving keeps its direction until it stops
+  int start_dir = 0;
+  const double speed = std::hypot(A.vel[0], A.vel[1]);
+  if (speed > 0.05) start_dir = std::cos(std::atan2(A.vel[1], A.vel[0]) - A.yaw) >= 0.0 ? 1 : -1;
+
+  sando::HybridAStar planner(cfg);
+  std::vector<sando::HybridAStarPose> poses;
+  bool reached = false;
+  std::string info;
+  const bool ok =
+      planner.plan(map, A.pos[0], A.pos[1], A.yaw, start_dir, G.pos[0], G.pos[1], poses, reached, info);
+  hybrid_astar_time_ms_ = timer.getElapsedMicros() / 1000.0;
+  if (par_.debug_verbose)
+    std::cout << "[hybrid_astar] " << (ok ? "ok" : "failed") << " in " << hybrid_astar_time_ms_
+              << " ms: " << info << std::endl;
+  if (!ok || poses.size() < 2) return false;
+
+  // First leg: up to the first forward/reverse change (the local plan stops there)
+  const bool rev = poses[1].reverse;
+  std::vector<sando::HybridAStarPose> leg{poses[0]};
+  for (size_t i = 1; i < poses.size() && poses[i].reverse == rev; ++i) leg.push_back(poses[i]);
+
+  // Moving, with the path changing direction within the stopping distance: keep the current plan
+  // (it ends at rest) so the vehicle stops, and plan the new direction from rest. Planning this
+  // short leg instead would start every replan still moving, extending the leg forever.
+  if (start_dir != 0 && leg.size() < poses.size()) {
+    double leg_len = 0.0;
+    for (size_t i = 1; i < leg.size(); ++i)
+      leg_len += std::hypot(leg[i].x - leg[i - 1].x, leg[i].y - leg[i - 1].y);
+    const double stop_dist = 1.0 + speed * speed / (2.0 * std::max(par_.a_max, 0.1));
+    if (leg_len < stop_dist) {
+      if (par_.debug_verbose)
+        std::cout << "[hybrid_astar] direction change in " << leg_len
+                  << " m: stopping with the current plan" << std::endl;
+      return false;
+    }
+  }
+
+  // ...and at most as much turning as the heading-cone chain can follow comfortably (half of the
+  // num_N - 1 cone steps): a tight turn is then done over several replans instead of asking one
+  // local plan (which ends at rest) for e.g. a whole U-turn
+  const double max_turn = 0.5 * (par_.num_N - 1) * par_.ackermann_heading_cone_deg * M_PI / 180.0;
+  double turned = 0.0;
+  for (size_t i = 1; i < leg.size(); ++i) {
+    double d = leg[i].yaw - leg[i - 1].yaw;
+    sando_utils::angle_wrap(d);
+    turned += std::fabs(d);
+    if (turned > max_turn) {
+      leg.resize(std::max<size_t>(i, 2));
+      break;
+    }
+  }
+  ackermann_leg_ = leg;
+  ackermann_leg_reverse_ = rev;
+
+  // Polyline for the corridors: vertices at most max_dist_vertexes apart (by arc length) whose
+  // straight segments stay free
+  auto segment_free = [&](const sando::HybridAStarPose& a, const sando::HybridAStarPose& b) {
+    const double d = std::hypot(b.x - a.x, b.y - a.y);
+    const int n = std::max(1, static_cast<int>(std::ceil(d / (0.5 * map.res))));
+    for (int k = 1; k < n; ++k) {
+      const double r = static_cast<double>(k) / n;
+      if (map.occupied(a.x + r * (b.x - a.x), a.y + r * (b.y - a.y))) return false;
+    }
+    return true;
+  };
+  global_path.clear();
+  global_path.push_back(Vecf<3>(leg[0].x, leg[0].y, z));
+  size_t last = 0;
+  double arc = 0.0;
+  for (size_t i = 1; i < leg.size(); ++i) {
+    arc += std::hypot(leg[i].x - leg[i - 1].x, leg[i].y - leg[i - 1].y);
+    const bool last_pose = (i + 1 == leg.size());
+    if (last_pose || arc > par_.max_dist_vertexes || !segment_free(leg[last], leg[i + 1])) {
+      global_path.push_back(Vecf<3>(leg[i].x, leg[i].y, z));
+      last = i;
+      arc = 0.0;
+    }
+  }
+  return global_path.size() >= 2;
+}
+
+std::vector<double> SANDO::computeHeadingReferences(
+    const RobotState& A, const vec_Vecf<3>& path) const {
+  const int N = par_.num_N;
+  const double max_step = par_.ackermann_heading_cone_deg * M_PI / 180.0;
+  std::vector<double> refs;
+  refs.reserve(N);
+  // Velocity direction: the vehicle heading, flipped on a reverse leg
+  const bool rev = !ackermann_leg_.empty() && ackermann_leg_reverse_;
+  double psi = A.yaw + (rev ? M_PI : 0.0);
+  sando_utils::angle_wrap(psi);
+  refs.push_back(psi);
+
+  if (!ackermann_leg_.empty() && !path.empty()) {
+    // Headings of the Hybrid A* leg, at the arc-length fraction each segment roughly covers (up
+    // to the leg pose nearest the path end, where the local plan ends)
+    const auto& leg = ackermann_leg_;
+    std::vector<double> cum{0.0};
+    size_t end = 0;
+    double best = 1e18;
+    for (size_t i = 0; i < leg.size(); ++i) {
+      if (i > 0) cum.push_back(cum.back() + std::hypot(leg[i].x - leg[i - 1].x, leg[i].y - leg[i - 1].y));
+      const double d = std::hypot(leg[i].x - path.back()[0], leg[i].y - path.back()[1]);
+      if (d < best) best = d, end = i;
+    }
+    for (int s = 1; s < N; ++s) {
+      const double target_arc = (s + 0.5) / N * cum[end];
+      size_t i = 0;
+      while (i < end && cum[i] < target_arc) ++i;
+      double target = leg[i].yaw + (rev ? M_PI : 0.0);
+      double step = target - psi;
+      sando_utils::angle_wrap(step);
+      psi += std::clamp(step, -max_step, max_step);
+      refs.push_back(psi);
+    }
+    return refs;
+  }
+
+  // Arc length along the (planar) global path
+  std::vector<double> cum{0.0};
+  for (size_t i = 1; i < path.size(); ++i)
+    cum.push_back(cum.back() + (path[i] - path[i - 1]).head<2>().norm());
+  const double L = cum.back();
+  auto point_at = [&](double s) -> Eigen::Vector2d {
+    s = std::clamp(s, 0.0, L);
+    size_t i = std::upper_bound(cum.begin(), cum.end(), s) - cum.begin();
+    if (i >= path.size()) return path.back().head<2>().cast<double>();
+    if (i == 0) return path.front().head<2>().cast<double>();
+    const double seg = cum[i] - cum[i - 1];
+    const double r = seg > 1e-9 ? (s - cum[i - 1]) / seg : 0.0;
+    return ((1.0 - r) * path[i - 1].head<2>() + r * path[i].head<2>()).cast<double>();
+  };
+
+  for (int s = 1; s < N; ++s) {
+    double target = psi;
+    if (L > 1e-3) {
+      // Path direction around the arc-length fraction this segment roughly covers
+      const double mid = (s + 0.5) / N * L;
+      const double d = std::max(0.25, 0.1 * L);
+      const Eigen::Vector2d dir = point_at(mid + d) - point_at(mid - d);
+      if (dir.norm() > 1e-6) target = std::atan2(dir.y(), dir.x());
+    }
+    double step = target - psi;
+    sando_utils::angle_wrap(step);
+    psi += std::clamp(step, -max_step, max_step);
+    refs.push_back(psi);
+  }
+  return refs;
+}
+
+bool SANDO::trajectoryCurvatureFeasible(const std::shared_ptr<SandoSolver>& solver) const {
+  const double kappa_max =
+      std::tan(par_.ackermann_max_steering_deg * M_PI / 180.0) / par_.ackermann_wheelbase;
+  const double limit = kappa_max * (1.0 + par_.ackermann_curvature_tolerance);
+  std::vector<RobotState> sps;
+  solver->fillGoalSetPoints();
+  solver->getGoalSetpoints(sps);
+  for (const auto& sp : sps) {
+    const double speed = std::hypot(sp.vel[0], sp.vel[1]);
+    if (speed < par_.ackermann_curvature_check_speed) continue;
+    const double kappa =
+        std::fabs(sp.vel[0] * sp.accel[1] - sp.vel[1] * sp.accel[0]) / (speed * speed * speed);
+    if (kappa > limit) {
+      if (par_.debug_verbose)
+        std::cout << "[ackermann] rejected: curvature " << kappa << " > " << limit << " at "
+                  << speed << " m/s" << std::endl;
+      return false;
+    }
+  }
   return true;
 }
 
@@ -1397,6 +1873,7 @@ bool SANDO::appendToPlan() {
           // we can use this plan
   {
     plan_.erase(plan_.end() - k_value_, plan_.end());
+    if (par_.isAckermann()) annotateAckermannHeadings(goal_setpoints_);
     plan_.insert(plan_.end(), goal_setpoints_.begin(), goal_setpoints_.end());
   }
 
@@ -1562,6 +2039,13 @@ void SANDO::addTraj(std::shared_ptr<DynTraj> new_traj, double current_time) {
 // ----------------------------------------------------------------------------
 
 void SANDO::updateState(RobotState data) {
+  // Ground vehicles plan in the plane at ground_plane_z (the middle of the planning band), not at
+  // their body height
+  if (par_.isAckermann()) {
+    data.pos[2] = par_.ground_plane_z;
+    data.vel[2] = 0.0;
+  }
+
   // If we are doing hardware and provide goal in global frame (e.g. vicon), we need to transform
   // the goal to the local frame
 
@@ -1656,7 +2140,11 @@ bool SANDO::getNextGoal(RobotState& next_goal) {
   }
 
   // ---- Yaw computation (BEFORE frame transform — everything in global frame) ----
-  if (!(drone_status_ == DroneStatus::GOAL_REACHED)) {
+  if (par_.isAckermann()) {
+    // The heading follows the direction of travel (no yawing in place); appendToPlan stored it
+    // with the yaw rate on every setpoint (flipped when reversing)
+    previous_yaw_ = next_goal.yaw;
+  } else if (!(drone_status_ == DroneStatus::GOAL_REACHED)) {
     // Get the desired yaw
     // If the planner keeps failing, just keep spinning
     if (replanning_failure_count_ > par_.yaw_spinning_threshold &&
@@ -2003,8 +2491,11 @@ bool SANDO::checkReadyToReplan() {
 // ----------------------------------------------------------------------------
 
 void SANDO::updateMapPtr(
-    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& pclptr_map,
-    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& pclptr_unk) {
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& pclptr_map_in,
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& pclptr_unk_in) {
+  const auto pclptr_map = toPlanningBand(pclptr_map_in);
+  const auto pclptr_unk = toPlanningBand(pclptr_unk_in);
+
   // 1) Atomically store the incoming clouds
   {
     std::lock_guard<std::mutex> lk(mtx_pclptr_map_);
@@ -2104,7 +2595,7 @@ void SANDO::updateOccupancyMapPtr(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr
   // store the incoming clouds
   {
     std::lock_guard<std::mutex> lk(mtx_pclptr_map_);
-    pclptr_map_ = pclptr_map;
+    pclptr_map_ = toPlanningBand(pclptr_map);
   }
 
   if (!hgp_manager_.isMapInitialized()) {
@@ -2185,8 +2676,24 @@ double SANDO::computeObstPosAndTrajMaxTimeForMapUpdate(
       continue;
     }
 
+    Eigen::Vector3d bbox = traj->bbox;  // Extract bbox from DynTraj
+    if (par_.isAckermann()) {
+      // Keep it if it reaches the planning band at any time within the planning horizon (an
+      // obstacle moving vertically can enter the band after being below or above it now)
+      const double Th = worst_traj_time_ * factors_.back();
+      bool reaches = false;
+      for (double dt = 0.0; dt <= Th + 1e-6 && !reaches; dt += 0.25) {
+        Eigen::Vector3d q = traj->eval(current_time + dt), b = bbox;
+        reaches = std::isfinite(q.z()) && obstacleToPlanningBand(q, b);
+      }
+      if (!reaches) continue;
+      // Column on the plane
+      p.z() = par_.ground_plane_z;
+      bbox.z() = std::max(bbox.z(), par_.z_max - par_.z_min);
+    }
+
     obst_pos.push_back(p);
-    obst_bbox.push_back(traj->bbox);  // Extract bbox from DynTraj
+    obst_bbox.push_back(bbox);
     selected_trajs.push_back(traj);
   }
 
@@ -2228,6 +2735,7 @@ double SANDO::computeObstPosAndTrajMaxTimeForMapUpdate(
         pk = selected_trajs[k]->eval(current_time);
       }
 
+      if (par_.isAckermann()) pk.z() = par_.ground_plane_z;
       pred_samples[k][j] = pk;
     }
   }

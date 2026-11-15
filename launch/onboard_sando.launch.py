@@ -64,6 +64,12 @@ def generate_launch_description():
         description="Trajectory optimization backend: highs_shot, gurobi or auto "
         "(empty: the 'solver' parameter of the config file)",
     )  # trajectory solver
+    vehicle_arg = DeclareLaunchArgument(
+        "vehicle",
+        default_value="uav",
+        description="uav, or ackermann (rover: applies config/sando_ackermann.yaml, starts "
+        "ackermann_controller and simulates a kinematic bicycle in fake_sim)",
+    )
     web_arg = DeclareLaunchArgument(
         "web",
         default_value="false",
@@ -147,6 +153,9 @@ def generate_launch_description():
         global_planner = LaunchConfiguration("global_planner").perform(context)
         solver = LaunchConfiguration("solver").perform(context)
         web = convert_str_to_bool(LaunchConfiguration("web").perform(context))
+        vehicle = LaunchConfiguration("vehicle").perform(context)
+        if vehicle not in ("uav", "ackermann"):
+            raise RuntimeError(f"vehicle:={vehicle}: use uav or ackermann")
         web_port = int(LaunchConfiguration("web_port").perform(context))
         use_benchmark = convert_str_to_bool(
             LaunchConfiguration("use_benchmark").perform(context)
@@ -204,6 +213,20 @@ def generate_launch_description():
         # Extract specific node parameters
         parameters = parameters["sando_node"]["ros__parameters"]
 
+        # Rover: overlay the Ackermann parameters and start on the planning plane
+        ackermann = vehicle == "ackermann"
+        if ackermann:
+            with open(
+                os.path.join(
+                    get_package_share_directory("sando"), "config", "sando_ackermann.yaml"
+                ),
+                "r",
+            ) as file:
+                parameters.update(yaml.safe_load(file)["sando_node"]["ros__parameters"])
+            urdf_path = PathJoinSubstitution(
+                [FindPackageShare("sando"), "urdf", "rover.urdf.xacro"]
+            )
+
         # Override sim_env if provided (hardware configs may not have sim_env)
         if sim_env_override:
             parameters["sim_env"] = sim_env_override
@@ -238,6 +261,14 @@ def generate_launch_description():
 
         if solver:
             parameters["solver"] = solver
+
+        # (after the sim_env override) In Gazebo the rover drives on the ground with real physics;
+        # in fake_sim it starts on the planning plane
+        spawn_z = z
+        if ackermann:
+            z = str(parameters["ground_plane_z"])
+            spawn_z = "0.25" if parameters["sim_env"] == "gazebo" else z
+        gazebo_rover = ackermann and parameters["sim_env"] == "gazebo"
 
         # Update parameters for benchmarking
         parameters["file_path"] = data_file
@@ -310,7 +341,7 @@ def generate_launch_description():
                     "-y",
                     y,
                     "-z",
-                    z,
+                    spawn_z,
                     "-Y",
                     yaw,
                 ],
@@ -331,7 +362,17 @@ def generate_launch_description():
                     f"{d435}/color/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
                     f"{d435}/color/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
                     f"/{namespace}/mid360/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
-                ],
+                ]
+                + (
+                    [
+                        # Rover: commands in, ground-truth odometry and wheel joints out
+                        f"/{namespace}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
+                        f"/{namespace}/odometry_gt@nav_msgs/msg/Odometry[gz.msgs.Odometry",
+                        f"/{namespace}/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model",
+                    ]
+                    if gazebo_rover
+                    else []
+                ),
                 remappings=[
                     (f"{d435}/depth/color", f"{d435}/depth/image_raw"),
                     (f"/{namespace}/mid360/points", f"/{namespace}/mid360_PointCloud2"),
@@ -429,6 +470,12 @@ def generate_launch_description():
                     "odom_topic": odom_topic,
                     "odom_frame_id": odom_frame_id,
                     "base_frame_id": base_frame_id,
+                    "vehicle_model": "ackermann" if ackermann else "ideal",
+                    "ackermann_wheelbase": float(parameters.get("ackermann_wheelbase", 0.5)),
+                    "ackermann_max_steering_deg": float(
+                        parameters.get("ackermann_max_steering_deg", 30.0)
+                    ),
+                    "ackermann_max_accel": float(parameters.get("a_max", 2.0)),
                 }
             ],
             # prefix='xterm -e gdb -q -ex run --args', # gdb debugging
@@ -468,6 +515,25 @@ def generate_launch_description():
             nodes_to_start.append(odom_to_global_state_node)
         elif use_hardware:
             nodes_to_start.append(pose_twist_to_state_node)
+        elif gazebo_rover:
+            # Rover in Gazebo: physics drives it; state and the map -> base_link TF come from the
+            # ground-truth odometry (body-frame twist, sim-time stamps)
+            nodes_to_start += [
+                robot_state_publisher_node,
+                spawn_entity_node,
+                gz_bridge_node,
+                Node(
+                    package="sando",
+                    executable="convert_odom_to_state",
+                    name="odom_to_state",
+                    namespace=namespace,
+                    output="screen",
+                    parameters=[
+                        {"twist_in_body_frame": True, "publish_tf": True, "restamp": True}
+                    ],
+                    remappings=[("odom", "odometry_gt")],
+                ),
+            ]
         else:
             nodes_to_start.append(fake_sim_node)
             if parameters["sim_env"] == "gazebo":
@@ -478,6 +544,26 @@ def generate_launch_description():
             elif parameters["sim_env"] == "fake_sim":
                 nodes_to_start.append(pcl_render_node)
         nodes_to_start.append(obstacle_tracker_node) if use_obstacle_tracker else None
+        if ackermann:
+            # Tracks SANDO's setpoints: goal + state -> cmd_vel (speed, yaw rate)
+            nodes_to_start.append(
+                Node(
+                    package="sando",
+                    executable="ackermann_controller",
+                    name="ackermann_controller",
+                    namespace=namespace,
+                    output="screen",
+                    parameters=[
+                        {
+                            "ackermann_wheelbase": float(parameters["ackermann_wheelbase"]),
+                            "ackermann_max_steering_deg": float(
+                                parameters["ackermann_max_steering_deg"]
+                            ),
+                            "v_max": float(parameters["v_max"]),
+                        }
+                    ],
+                )
+            )
         if web:
             nodes_to_start.append(
                 Node(
@@ -510,6 +596,7 @@ def generate_launch_description():
             data_file_arg,
             global_planner_arg,
             solver_arg,
+            vehicle_arg,
             web_arg,
             web_port_arg,
             use_benchmark_arg,

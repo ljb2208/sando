@@ -38,6 +38,25 @@ struct Parameters {
 
   // UAV or Ground robot
   std::string vehicle_type;
+  /** @brief Ackermann-steered rover: planar, forward-only, curvature-limited trajectories. */
+  bool isAckermann() const { return vehicle_type == "ackermann"; }
+  double ground_plane_z{1.0};             // [m] Height ground vehicles plan at (non-UAV)
+  double ackermann_wheelbase{0.5};        // [m] Front-to-rear axle distance
+  double ackermann_max_steering_deg{30.0};  // [deg] Max front-wheel steering angle
+  double ackermann_heading_cone_deg{35.0};  // [deg] Velocity within this angle of the reference
+  double ackermann_max_lateral_accel{2.0};  // [m/s^2] Max acceleration across the heading
+  double ackermann_curvature_check_speed{0.3};  // [m/s] Check curvature above this speed
+  double ackermann_curvature_tolerance{0.15};   // [-] Accepted curvature excess (fraction)
+  std::string ackermann_global_planner{"hybrid_astar"};  // "hybrid_astar" or "hgp"
+  bool ackermann_allow_reverse{false};          // reverse in the global path and trajectories
+  std::vector<double> ackermann_footprint{0.8, 0.5};  // [m] length, width (Hybrid A* check)
+  double hybrid_astar_step{0.5};                // [m] motion primitive length
+  int hybrid_astar_max_expansions{8000};
+  double hybrid_astar_reverse_penalty{2.0};     // cost factor for reversing
+  double hybrid_astar_switch_penalty{3.0};      // [m] cost of a forward/reverse change
+  bool ackermann_evasion_enabled{false};        // escape moves when stopped and threatened
+  double ackermann_evasion_horizon{3.0};        // [s] threat look-ahead
+  double ackermann_evasion_margin{0.3};         // [m] clearance (beyond the footprint) to keep
   bool provide_goal_in_global_frame;
   bool state_already_in_global_frame;
   bool use_hardware;

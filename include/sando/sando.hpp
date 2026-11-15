@@ -27,6 +27,7 @@
 #include <sando/solver.hpp>
 #include <sando/utils.hpp>
 #include "hgp/hgp_manager.hpp"
+#include "hgp/hybrid_astar.hpp"
 #include "hgp/termcolor.hpp"
 #include "sando/sando_type.hpp"
 #include "timer.hpp"
@@ -227,6 +228,54 @@ class SANDO {
    *  @param next_goal Goal state to update with computed yaw and dyaw.
    */
   void getDesiredYaw(RobotState& next_goal);
+
+  /** @brief Ackermann: reference heading of each trajectory segment, starting at A's heading and
+   *  turning toward the global path's direction by at most the heading cone per segment (so
+   *  consecutive heading cones overlap). */
+  std::vector<double> computeHeadingReferences(const RobotState& A, const vec_Vecf<3>& path) const;
+
+  /** @brief Ackermann: whether the solver's trajectory respects the minimum turning radius
+   *  (curvature tan(max_steering) / wheelbase, checked above ackermann_curvature_check_speed). */
+  bool trajectoryCurvatureFeasible(const std::shared_ptr<SandoSolver>& solver) const;
+
+  /** @brief Ackermann: heading at plan index `idx`: the direction of the last moving setpoint at
+   *  or before it, else the last commanded yaw. Caller holds mtx_plan_. */
+  double headingAtPlanIndex(int idx) const;
+
+  /** @brief Ackermann: global path with Hybrid A* from A (with its heading) toward G. Keeps the
+   *  first leg (up to a forward/reverse change, where the local plan then ends at rest) in
+   *  ackermann_leg_ and returns it as polyline vertices for the corridors. */
+  bool planHybridAStar(const RobotState& A, const RobotState& G, vec_Vecf<3>& global_path);
+
+  /** @brief Ackermann: set each setpoint's yaw to the vehicle heading (velocity direction, flipped
+   *  when reversing; held while stopped) and dyaw to the matching yaw rate. */
+  void annotateAckermannHeadings(std::vector<RobotState>& setpoints) const;
+
+  /** @brief Ackermann: the planar map view of an hgp voxel map at ground_plane_z. */
+  sando::HybridAStarMap makePlanarMap(const std::shared_ptr<sando::VoxelMapUtil>& mu) const;
+
+  /** @brief Ackermann evasion: when the rover is stopped (or slow) and a tracked obstacle is
+   *  predicted to come within ackermann_evasion_margin of its footprint within
+   *  ackermann_evasion_horizon, replace the plan with the short drivable escape move (forward or
+   *  reverse arc, footprint-checked against the map) that keeps the largest predicted clearance.
+   *  Returns true when an escape move was started. */
+  bool checkGroundEvasion(double current_time);
+
+  /** @brief Smallest predicted clearance between the rover's footprint circle at (x, y) and the
+   *  tracked obstacles reaching the planning band, at absolute time t_abs. */
+  double evasionClearance(
+      double x, double y, double t_abs, const std::vector<std::shared_ptr<DynTraj>>& trajs) const;
+
+  /** @brief Ackermann: the obstacle points that matter for a rover, as columns over the planning
+   *  band [z_min, z_max]: points inside the band are repeated at every map layer of it (so the
+   *  global planner and corridors cannot pass above or below them); ground below and overhangs
+   *  above the band are dropped. Other vehicles: the cloud unchanged. */
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr toPlanningBand(
+      const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud) const;
+
+  /** @brief Ackermann: turn an obstacle pose into a column over the planning band (position on
+   *  the plane, height of the band). Returns false (unchanged) when it does not reach the band. */
+  bool obstacleToPlanningBand(Eigen::Vector3d& pos, Eigen::Vector3d& bbox) const;
 
   /** @brief Applies filtered yaw stepping toward a desired yaw difference, clamped by w_max.
    *  @param diff Angle difference to the desired yaw.
@@ -565,6 +614,14 @@ class SANDO {
   std::deque<RobotState> plan_;                          // Plan for the drone
   std::deque<std::vector<RobotState>> plan_safe_paths_;  // Indicate if the state has a safe path
   double previous_yaw_ = 0.0;                            // Previous yaw
+  std::vector<double> heading_refs_;  // Ackermann: per-segment headings of the current replan
+  std::vector<sando::HybridAStarPose> ackermann_leg_;  // Ackermann: first leg of the global path
+  bool ackermann_leg_reverse_ = false;                 // that leg is driven in reverse
+  bool planned_leg_reverse_ = false;     // direction of the local plan being solved/appended
+  double planned_leg_start_yaw_ = 0.0;   // vehicle heading at its A
+  double hybrid_astar_time_ms_ = 0.0;
+  bool evasion_active_ = false;  // Ackermann: an escape move is being driven (no replanning)
+  int evasion_count_ = 0;
   double prev_dyaw_ = 0.0;                               // Previous dyaw
   double dyaw_filtered_ = 0.0;                           // Filtered dyaw
   PieceWisePol pwp_to_share_;                            // Piecewise polynomial to share

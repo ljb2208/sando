@@ -131,8 +131,14 @@ def generate_launch_description():
         if world_file_override:
             world_path = world_file_override
         elif backend == "gz":
-            # Gazebo Sim worlds live in worlds/gz/<name>.sdf
+            # Gazebo Sim worlds live in worlds/gz/<name>.sdf; an env without a mapping (e.g. the
+            # rover_* worlds) names its .sdf directly instead of falling back to easy_forest
             world_file = world_mapping.get(env_value, "easy_forest.world")
+            direct = os.path.join(
+                get_package_share_directory("sando"), "worlds", "gz", env_value + ".sdf"
+            )
+            if env_value not in world_mapping and os.path.exists(direct):
+                world_file = env_value + ".sdf"
             world_path = os.path.join(
                 get_package_share_directory("sando"),
                 "worlds",

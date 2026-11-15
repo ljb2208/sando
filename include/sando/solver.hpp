@@ -66,6 +66,13 @@ class TrajSolver {
   virtual void setPolytopesTimeLayered(
       const std::vector<std::vector<LinearConstraint3D>>& polytopes_by_time) = 0;
 
+  /** @brief Ackermann vehicles: reference heading [rad] of each trajectory segment. The velocity of
+   *  segment i is kept within ackermann_heading_cone_deg of headings[i] (forward only) and its
+   *  acceleration across that heading below ackermann_max_lateral_accel. Ignored for other
+   *  vehicles, or when the size differs from the segment count.
+   */
+  virtual void setHeadingReference(const std::vector<double>& headings) = 0;
+
   /** @brief Build and solve the trajectory problem with time allocation `factor`.
    *  @param solver_error_detected Set when the solver failed (the solver should then be rebuilt).
    *  @param solver_computation_time Output solve time [ms].

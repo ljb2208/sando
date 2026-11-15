@@ -333,6 +333,10 @@ class HGPManager {
    */
   std::shared_ptr<sando::VoxelMapUtil> getMapUtilSharedPtr();
 
+  /** @brief The map copy of the current planning cycle (made by setupHGPPlanner, with the start
+   *  and goal freed); null before the first setup. */
+  std::shared_ptr<sando::VoxelMapUtil> getPlanningMapUtil() const { return map_util_for_planning_; }
+
   /** @brief Construct a Veci<3> from three integer indices. */
   static inline Veci<3> idxs_to_veci3(int x, int y, int z) {
     Veci<3> v;

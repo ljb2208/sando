@@ -28,7 +28,7 @@ sando_node:
 
         # --- Environment & Vehicle ---
         sim_env: "gazebo"                               # ["gazebo", "fake_sim", "rviz_only"]
-        vehicle_type: "uav"                             # ["uav", "ground_robot", "quadruped_robot"]
+        vehicle_type: "uav"                             # ["uav", "ground_robot", "quadruped_robot", "ackermann"] (ackermann: see config/sando_ackermann.yaml)
         use_hardware: false                             # [-] Real hardware vs simulation
         provide_goal_in_global_frame: false             # [-] Goal given in global frame (true for hardware with Vicon)
         visual_level: 2                                 # [-] Visualization level (0: none, 1: minimal, 2: full)

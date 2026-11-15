@@ -123,6 +123,7 @@ class SolverGurobi : public TrajSolver {
   /** @brief Set time-layered safety corridor polytopes (one set per trajectory segment).
    *  @param polytopes_by_time Outer vector indexed by time step, inner by polytope index.
    */
+  void setHeadingReference(const std::vector<double>& headings) override;
   void setPolytopesTimeLayered(
       const std::vector<std::vector<LinearConstraint3D>>& polytopes_by_time) override;
 
@@ -182,6 +183,7 @@ class SolverGurobi : public TrajSolver {
   /** @brief Add velocity, acceleration, and jerk constraints using the configured norm type
    * (Linf/L1/L2). */
   void setDynamicConstraints();
+  void setAckermannConstraints_();  // planar, heading cone, lateral acceleration
 
   /** @brief Create the Gurobi decision variables (free control point parameters d3, d4, ...). */
   void createVars();
@@ -596,6 +598,13 @@ class SolverGurobi : public TrajSolver {
 
   // Optimization weights
   double jerk_smooth_weight_ = 10.0;
+
+  // Ackermann vehicles (see setHeadingReference)
+  bool ackermann_ = false;
+  double plane_z_ = 1.0;
+  double heading_cone_tan_ = 0.7;
+  double max_lateral_accel_ = 2.0;
+  std::vector<double> heading_refs_;
 
   double factor_initial_ = 0.6;
   double factor_final_ = 2.0;

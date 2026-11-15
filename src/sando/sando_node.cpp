@@ -265,6 +265,23 @@ void SANDO_NODE::declareParameters() {
 
   // UAV or Ground robot
   this->declare_parameter("vehicle_type", "uav");
+  this->declare_parameter("ground_plane_z", 1.0);
+  this->declare_parameter("ackermann_wheelbase", 0.5);
+  this->declare_parameter("ackermann_max_steering_deg", 30.0);
+  this->declare_parameter("ackermann_heading_cone_deg", 35.0);
+  this->declare_parameter("ackermann_max_lateral_accel", 2.0);
+  this->declare_parameter("ackermann_curvature_check_speed", 0.3);
+  this->declare_parameter("ackermann_curvature_tolerance", 0.15);
+  this->declare_parameter("ackermann_global_planner", "hybrid_astar");
+  this->declare_parameter("ackermann_allow_reverse", false);
+  this->declare_parameter("ackermann_footprint", std::vector<double>{0.8, 0.5});
+  this->declare_parameter("hybrid_astar_step", 0.5);
+  this->declare_parameter("hybrid_astar_max_expansions", 8000);
+  this->declare_parameter("hybrid_astar_reverse_penalty", 2.0);
+  this->declare_parameter("hybrid_astar_switch_penalty", 3.0);
+  this->declare_parameter("ackermann_evasion_enabled", false);
+  this->declare_parameter("ackermann_evasion_horizon", 3.0);
+  this->declare_parameter("ackermann_evasion_margin", 0.3);
   this->declare_parameter("provide_goal_in_global_frame", false);
   this->declare_parameter("state_already_in_global_frame", false);
   this->declare_parameter("use_hardware", false);
@@ -464,6 +481,51 @@ void SANDO_NODE::setParameters() {
 
   // Vehicle type (UAV, Wheeled Robit, or Quadruped)
   par_.vehicle_type = this->get_parameter("vehicle_type").as_string();
+  par_.ground_plane_z = this->get_parameter("ground_plane_z").as_double();
+  par_.ackermann_wheelbase = this->get_parameter("ackermann_wheelbase").as_double();
+  par_.ackermann_max_steering_deg = this->get_parameter("ackermann_max_steering_deg").as_double();
+  par_.ackermann_heading_cone_deg = this->get_parameter("ackermann_heading_cone_deg").as_double();
+  par_.ackermann_max_lateral_accel = this->get_parameter("ackermann_max_lateral_accel").as_double();
+  par_.ackermann_curvature_check_speed =
+      this->get_parameter("ackermann_curvature_check_speed").as_double();
+  par_.ackermann_curvature_tolerance =
+      this->get_parameter("ackermann_curvature_tolerance").as_double();
+  par_.ackermann_global_planner = this->get_parameter("ackermann_global_planner").as_string();
+  par_.ackermann_allow_reverse = this->get_parameter("ackermann_allow_reverse").as_bool();
+  par_.ackermann_footprint = this->get_parameter("ackermann_footprint").as_double_array();
+  par_.hybrid_astar_step = this->get_parameter("hybrid_astar_step").as_double();
+  par_.hybrid_astar_max_expansions = this->get_parameter("hybrid_astar_max_expansions").as_int();
+  par_.hybrid_astar_reverse_penalty =
+      this->get_parameter("hybrid_astar_reverse_penalty").as_double();
+  par_.hybrid_astar_switch_penalty =
+      this->get_parameter("hybrid_astar_switch_penalty").as_double();
+  par_.ackermann_evasion_enabled = this->get_parameter("ackermann_evasion_enabled").as_bool();
+  par_.ackermann_evasion_horizon = this->get_parameter("ackermann_evasion_horizon").as_double();
+  par_.ackermann_evasion_margin = this->get_parameter("ackermann_evasion_margin").as_double();
+  if (par_.isAckermann() &&
+      (par_.ackermann_global_planner != "hybrid_astar" && par_.ackermann_global_planner != "hgp")) {
+    RCLCPP_ERROR(this->get_logger(), "ackermann_global_planner must be 'hybrid_astar' or 'hgp'");
+    rclcpp::shutdown();
+    return;
+  }
+  if (par_.isAckermann() &&
+      (par_.ackermann_footprint.size() != 2 || par_.ackermann_footprint[0] <= 0.0 ||
+       par_.ackermann_footprint[1] <= 0.0 || par_.hybrid_astar_step <= 0.0)) {
+    RCLCPP_ERROR(this->get_logger(),
+                 "ackermann_footprint must be [length, width] > 0 and hybrid_astar_step > 0");
+    rclcpp::shutdown();
+    return;
+  }
+  if (par_.isAckermann() &&
+      (par_.ackermann_wheelbase <= 0.0 || par_.ackermann_max_steering_deg <= 0.0 ||
+       par_.ackermann_max_steering_deg >= 89.0 || par_.ackermann_heading_cone_deg <= 0.0 ||
+       par_.ackermann_heading_cone_deg >= 89.0)) {
+    RCLCPP_ERROR(this->get_logger(),
+                 "Invalid Ackermann parameters: need wheelbase > 0 and steering and heading cone "
+                 "angles in (0, 89) deg");
+    rclcpp::shutdown();
+    return;
+  }
   par_.provide_goal_in_global_frame = this->get_parameter("provide_goal_in_global_frame").as_bool();
   par_.state_already_in_global_frame =
       this->get_parameter("state_already_in_global_frame").as_bool();
@@ -676,7 +738,7 @@ void SANDO_NODE::printParameters() {
   RCLCPP_INFO(this->get_logger(), "Use Global Point Cloud: %d", par_.use_global_pc);
 
   // Vehicle type (UAV, Wheeled Robit, or Quadruped)
-  RCLCPP_INFO(this->get_logger(), "Vehicle Type: %d", par_.vehicle_type);
+  RCLCPP_INFO(this->get_logger(), "Vehicle Type: %s", par_.vehicle_type.c_str());
   RCLCPP_INFO(
       this->get_logger(), "Provide Goal in Global Frame: %d", par_.provide_goal_in_global_frame);
   RCLCPP_INFO(this->get_logger(), "Use Hardware: %d", par_.use_hardware);

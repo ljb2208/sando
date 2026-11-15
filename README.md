@@ -315,6 +315,49 @@ Hardware-specific config: `config/sando_hw_quadrotor.yaml` (with inline comments
 
 </details>
 
+### Ackermann Rover (experimental)
+
+`vehicle:=ackermann` (or `run_sim.py --vehicle ackermann`) plans for a car-like rover: trajectories
+stay in the plane at `ground_plane_z`, move forward only, keep each segment's velocity within
+`ackermann_heading_cone_deg` of a heading taken from the global path, and are rejected when they
+turn tighter than the steering allows (`tan(ackermann_max_steering_deg) / ackermann_wheelbase`).
+Obstacles inside the planning band `[z_min, z_max]` become full-height columns; ground below and
+overhangs above it are ignored. `ackermann_controller` tracks the trajectory and publishes `cmd_vel`
+(speed and the yaw rate the steering produces) and `steering_angle`; in simulation `fake_sim`
+drives a kinematic bicycle model with it. Parameters: `config/sando_ackermann.yaml`.
+
+```bash
+python3 scripts/run_sim.py --mode dynamic --vehicle ackermann       # fake_sim (bicycle model)
+python3 scripts/run_sim.py --mode static -d hard --vehicle ackermann # Gazebo forest, real physics
+```
+
+In Gazebo (`--mode static`/`gazebo`) the rover is a physical model (`urdf/rover.urdf.xacro`):
+rear-wheel drive and front steering through Gazebo's AckermannSteering system, driven by the
+controller's `cmd_vel`, with a level Mid-360 lidar. Its state and the `map -> NX01/base_link`
+transform come from Gazebo's ground-truth odometry (`convert_odom_to_state`). It runs in the
+`rover_*_forest` worlds, where the ground and the trees have contact (in the drone worlds they are
+ghosts), and the mapper uses `rover_global_mapper.yaml`: a map around the ground, clearing along
+lidar beams without a return (open sky) and around the rover's blind zone.
+
+The global path comes from a Hybrid A* search (`ackermann_global_planner: "hybrid_astar"`) over
+position and heading with bicycle-model arcs, so it respects the turning radius and checks the
+rectangular `ackermann_footprint` along the way. With `ackermann_allow_reverse` it can reverse:
+each local plan covers one direction only and ends at rest where the direction changes; a moving
+rover first stops (on its current plan) before a direction change. Tight turns are split over
+several replans (each local plan turns at most half of what the heading-cone chain allows).
+`ackermann_global_planner: "hgp"` uses SANDO's grid planner instead (no turning radius).
+
+When the rover is stopped or slow and a tracked obstacle is predicted to come within
+`ackermann_evasion_margin` of its footprint in the next `ackermann_evasion_horizon` seconds, it
+drives a short escape move (a 1.5 m or 3 m arc, forward or reverse, footprint-checked against the
+map) chosen for the largest predicted clearance, then resumes planning (`ackermann_evasion_enabled`).
+
+Limitations: the local corridors still inflate obstacles by a circle around the rover
+(`drone_bbox`), so gaps the footprint fits through can still be too narrow for a trajectory; and
+`obst_max_vel` matters more than for the drone: below the obstacles' real speed the corridors can
+let fast obstacles graze the rover, above it a slow rover often finds no plan in dense traffic (see
+the comment in `config/sando_ackermann.yaml`).
+
 ### Web Interface
 
 A browser view of one agent: planner status, replanning performance (rate, success, timing

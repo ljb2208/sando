@@ -7,6 +7,7 @@
  * -------------------------------------------------------------------------- */
 
 #include <math.h>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -25,6 +26,7 @@
 #include "ros_gz_interfaces/srv/set_entity_pose.hpp"
 #endif
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -59,6 +61,14 @@ class FakeSim : public rclcpp::Node {
     // If empty, we will set base_frame_id_ = target_frame_ (ns_/base_link)
     this->declare_parameter<std::string>("base_frame_id", "");
 
+    // Vehicle model: "ideal" (the state follows SANDO's setpoints exactly) or "ackermann"
+    // (kinematic bicycle driven by cmd_vel from ackermann_controller)
+    this->declare_parameter<std::string>("vehicle_model", "ideal");
+    this->declare_parameter<double>("ackermann_wheelbase", 0.5);
+    this->declare_parameter<double>("ackermann_max_steering_deg", 30.0);
+    this->declare_parameter<double>("ackermann_max_accel", 2.0);
+    this->declare_parameter<std::vector<double>>("rover_size", {0.8, 0.5, 0.3});
+
     // Get parameters
     auto start_pos = this->get_parameter("start_pos").as_double_array();
     double yaw = this->get_parameter("start_yaw").as_double();
@@ -72,6 +82,12 @@ class FakeSim : public rclcpp::Node {
     odom_topic_ = this->get_parameter("odom_topic").as_string();
     odom_frame_id_ = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_param_ = this->get_parameter("base_frame_id").as_string();
+    ackermann_ = this->get_parameter("vehicle_model").as_string() == "ackermann";
+    wheelbase_ = this->get_parameter("ackermann_wheelbase").as_double();
+    max_steer_ = this->get_parameter("ackermann_max_steering_deg").as_double() * M_PI / 180.0;
+    max_accel_ = this->get_parameter("ackermann_max_accel").as_double();
+    rover_size_ = this->get_parameter("rover_size").as_double_array();
+    rover_yaw_ = yaw;
 
     // Print parameters
     RCLCPP_INFO(
@@ -138,6 +154,17 @@ class FakeSim : public rclcpp::Node {
     // Subscribers
     sub_goal_ = this->create_subscription<dynus_interfaces::msg::Goal>(
         "goal", 10, std::bind(&FakeSim::goalCallback, this, std::placeholders::_1));
+    if (ackermann_) {
+      sub_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
+          "cmd_vel", 10, [this](const geometry_msgs::msg::Twist& m) {
+            std::lock_guard<std::mutex> lk(goal_mtx_);
+            cmd_v_ = m.linear.x;
+            cmd_w_ = m.angular.z;
+          });
+      RCLCPP_INFO(this->get_logger(), "Vehicle model: ackermann (wheelbase %.2f m, max steering "
+                                      "%.1f deg), driven by cmd_vel", wheelbase_,
+                  max_steer_ * 180.0 / M_PI);
+    }
 
     // Timer to simulate TF broadcast
     timer_ = this->create_wall_timer(10ms, std::bind(&FakeSim::pubCallback, this), cb_group_me_1_);
@@ -194,6 +221,15 @@ class FakeSim : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
 
   rclcpp::Subscription<dynus_interfaces::msg::Goal>::SharedPtr sub_goal_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
+
+  // Ackermann (kinematic bicycle) model
+  bool ackermann_{false};
+  double wheelbase_{0.5}, max_steer_{0.52}, max_accel_{2.0};
+  std::vector<double> rover_size_{0.8, 0.5, 0.3};
+  double cmd_v_{0.0}, cmd_w_{0.0};  // latest cmd_vel (guarded by goal_mtx_)
+  double rover_v_{0.0}, rover_yaw_{0.0}, rover_steer_{0.0};
+  rclcpp::Time last_step_t_{0, 0, RCL_ROS_TIME};
   rclcpp::Client<gazebo_msgs::srv::SetEntityState>::SharedPtr gazebo_client_;
 #ifdef SANDO_HAS_ROS_GZ
   rclcpp::Client<ros_gz_interfaces::srv::SetEntityPose>::SharedPtr gz_client_;
@@ -256,6 +292,8 @@ class FakeSim : public rclcpp::Node {
   }
 
   void goalCallback(const dynus_interfaces::msg::Goal::SharedPtr data) {
+    if (ackermann_) return;  // driven by cmd_vel instead
+
     // Hopf fibration approach
     Eigen::Vector3d thrust;
     thrust << data->a.x, data->a.y, data->a.z + 9.81;
@@ -413,7 +451,44 @@ class FakeSim : public rclcpp::Node {
     pub_odom_->publish(odom);
   }
 
+  /** Integrate the kinematic bicycle model with the latest cmd_vel (speed, yaw rate). */
+  void stepAckermann() {
+    const rclcpp::Time t = this->get_clock()->now();
+    if (last_step_t_.nanoseconds() == 0 || last_step_t_.get_clock_type() != t.get_clock_type()) {
+      last_step_t_ = t;
+      return;
+    }
+    const double dt = std::clamp((t - last_step_t_).seconds(), 0.0, 0.1);
+    last_step_t_ = t;
+    double v_cmd, w_cmd;
+    {
+      std::lock_guard<std::mutex> lk(goal_mtx_);
+      v_cmd = cmd_v_;
+      w_cmd = cmd_w_;
+    }
+    // Speed follows the command with limited acceleration; steering comes from the commanded yaw
+    // rate (omega = v tan(delta) / L), limited to the steering range
+    rover_v_ += std::clamp(v_cmd - rover_v_, -max_accel_ * dt, max_accel_ * dt);
+    if (std::fabs(v_cmd) > 1e-3) rover_steer_ = std::atan(wheelbase_ * w_cmd / v_cmd);
+    rover_steer_ = std::clamp(rover_steer_, -max_steer_, max_steer_);
+    const double yaw_rate = rover_v_ * std::tan(rover_steer_) / wheelbase_;
+    state_.pos.x += rover_v_ * std::cos(rover_yaw_) * dt;
+    state_.pos.y += rover_v_ * std::sin(rover_yaw_) * dt;
+    rover_yaw_ += yaw_rate * dt;
+    state_.vel.x = rover_v_ * std::cos(rover_yaw_);
+    state_.vel.y = rover_v_ * std::sin(rover_yaw_);
+    state_.vel.z = 0.0;
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, rover_yaw_);
+    state_.quat.x = q.x();
+    state_.quat.y = q.y();
+    state_.quat.z = q.z();
+    state_.quat.w = q.w();
+  }
+
   void pubCallback() {
+    if (ackermann_) stepAckermann();
+
     // Compute interpolated transform (extrapolates between planner updates)
     getInterpolatedTransform();
     br_.sendTransform(t_);
@@ -456,6 +531,17 @@ class FakeSim : public rclcpp::Node {
     marker.pose.orientation.z = t_.transform.rotation.z;
     marker.pose.orientation.w = t_.transform.rotation.w;
 
+    if (ackermann_) {  // rover body
+      marker.type = marker.CUBE;
+      marker.scale.x = rover_size_.size() > 0 ? rover_size_[0] : 0.8;
+      marker.scale.y = rover_size_.size() > 1 ? rover_size_[1] : 0.5;
+      marker.scale.z = rover_size_.size() > 2 ? rover_size_[2] : 0.3;
+      marker.color.r = 0.16f;
+      marker.color.g = 0.47f;
+      marker.color.b = 0.84f;
+      marker.color.a = 1.0f;
+      return marker;
+    }
     marker.mesh_use_embedded_materials = true;
     marker.mesh_resource = "package://sando/meshes/quadrotor/quadrotor.dae";
     marker.scale.x = 0.75;

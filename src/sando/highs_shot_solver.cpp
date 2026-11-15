@@ -199,6 +199,10 @@ void SolverHighsShot::initializeSolver(const Parameters& par) {
   w_max_ = par.w_max;
   debug_verbose_ = par.debug_verbose;
   jerk_smooth_weight_ = par.jerk_smooth_weight;
+  ackermann_ = par.isAckermann();
+  plane_z_ = par.ground_plane_z;
+  heading_cone_tan_ = std::tan(par.ackermann_heading_cone_deg * M_PI / 180.0);
+  max_lateral_accel_ = par.ackermann_max_lateral_accel;
   using_variable_elimination_ =
       par.using_variable_elimination;  // benchmark param for SANDO with/without var elimination
 
@@ -4388,6 +4392,62 @@ void SolverHighsShot::setDynamicConstraints() {
             "jerk_L2_seg" + std::to_string(segment) + "_cp" + std::to_string(i)));
       }
     }  // end for segment
+  }
+
+  setAckermannConstraints_();
+}
+
+
+void SolverHighsShot::setHeadingReference(const std::vector<double>& headings) { heading_refs_ = headings; }
+
+void SolverHighsShot::setAckermannConstraints_() {
+  if (!ackermann_) return;
+  for (int seg = 0; seg < N_; seg++) {
+    const std::string s = std::to_string(seg);
+
+    // Planar: the Bezier control points of z stay at the plane, so z(t) does (convex hull)
+    const double T = dt_[seg];
+    const LinExpr A = x_[2][4 * seg] * (T * T * T);
+    const LinExpr B = x_[2][4 * seg + 1] * (T * T);
+    const LinExpr C = x_[2][4 * seg + 2] * T;
+    const LinExpr D = x_[2][4 * seg + 3];
+    const std::vector<LinExpr> z_cps = {
+        D, D + C / 3.0, D + C * (2.0 / 3.0) + B / 3.0, D + C + B + A};
+    for (size_t i = 0; i < z_cps.size(); i++) {
+      if (seg == 0 && i == 0) continue;  // fixed by the initial condition
+      dyn_cons_.push_back(m_.addConstr(
+          z_cps[i] <= plane_z_ + 0.01, "plane_hi_seg" + s + "_cp" + std::to_string(i)));
+      dyn_cons_.push_back(m_.addConstr(
+          z_cps[i] >= plane_z_ - 0.01, "plane_lo_seg" + s + "_cp" + std::to_string(i)));
+    }
+
+    if (heading_refs_.size() != static_cast<size_t>(N_)) continue;
+    const double ch = std::cos(heading_refs_[seg]), sh = std::sin(heading_refs_[seg]);
+
+    // Heading cone (forward only): the velocity control points, hence the velocity, stay within
+    // the cone around the reference heading. The fixed end points (initial velocity, rest at the
+    // end) are skipped.
+    const std::vector<LinExpr> vx = getVelCP(seg, 0), vy = getVelCP(seg, 1);
+    for (size_t i = 0; i < vx.size(); i++) {
+      if ((seg == 0 && i == 0) || (seg == N_ - 1 && i + 1 == vx.size())) continue;
+      const LinExpr fwd = vx[i] * ch + vy[i] * sh;
+      const LinExpr lat = vy[i] * ch - vx[i] * sh;
+      const std::string n = "_seg" + s + "_cp" + std::to_string(i);
+      dyn_cons_.push_back(m_.addConstr(fwd >= 0.0, "heading_fwd" + n));
+      dyn_cons_.push_back(m_.addConstr(lat <= fwd * heading_cone_tan_, "heading_left" + n));
+      dyn_cons_.push_back(m_.addConstr(lat >= fwd * (-heading_cone_tan_), "heading_right" + n));
+    }
+
+    // Lateral acceleration (across the reference heading): with the forward speed this bounds
+    // the curvature; the exact curvature is checked after the solve
+    const std::vector<LinExpr> ax = getAccelCP(seg, 0), ay = getAccelCP(seg, 1);
+    for (size_t i = 0; i < ax.size(); i++) {
+      if ((seg == 0 && i == 0) || (seg == N_ - 1 && i + 1 == ax.size())) continue;
+      const LinExpr lat = ay[i] * ch - ax[i] * sh;
+      const std::string n = "_seg" + s + "_cp" + std::to_string(i);
+      dyn_cons_.push_back(m_.addConstr(lat <= max_lateral_accel_, "lat_accel_hi" + n));
+      dyn_cons_.push_back(m_.addConstr(lat >= -max_lateral_accel_, "lat_accel_lo" + n));
+    }
   }
 }
 

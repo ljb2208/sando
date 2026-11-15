@@ -41,6 +41,7 @@ find_package(dynus_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(gazebo_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(gazebo_ros QUIET)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -154,7 +155,7 @@ set(SANDO_SOLVER_SOURCES "")
 set(SANDO_SOLVER_LIBRARIES sando_solvers)
 
 # add executables
-add_executable(sando src/sando/sando_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+add_executable(sando src/sando/sando_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/hybrid_astar.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
 target_link_libraries(sando ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(sando rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
@@ -175,6 +176,9 @@ target_link_libraries(obstacle_tracker_node ${PCL_LIBRARIES})
 ament_target_dependencies(obstacle_tracker_node rclcpp rclcpp_components visualization_msgs Eigen3 dynus_interfaces std_msgs gazebo_msgs sensor_msgs tf2 tf2_ros pcl_conversions tf2_geometry_msgs tf2_eigen)
 
 # Add goal to cmd_vel converter
+add_executable(ackermann_controller src/sando/ackermann_controller.cpp)
+ament_target_dependencies(ackermann_controller rclcpp dynus_interfaces geometry_msgs std_msgs)
+
 add_executable(convert_goal_to_cmd_vel src/sando/convert_goal_to_cmd_vel.cpp)
 target_link_libraries(convert_goal_to_cmd_vel)
 ament_target_dependencies(convert_goal_to_cmd_vel rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
@@ -256,20 +260,20 @@ ament_target_dependencies(dynamic_forest_node
 )
 
 # For benchmark SFC generation
-add_executable(corridor_generator_node src/sando/corridor_generator_node.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp
+add_executable(corridor_generator_node src/sando/corridor_generator_node.cpp src/hgp/hgp_manager.cpp src/hgp/hybrid_astar.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp
 )
 target_link_libraries(corridor_generator_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(corridor_generator_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(local_traj_benchmark_node src/sando/local_traj_benchmark.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+add_executable(local_traj_benchmark_node src/sando/local_traj_benchmark.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/hybrid_astar.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
 target_link_libraries(local_traj_benchmark_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(local_traj_benchmark_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(visualize_local_trajs_node src/sando/visualize_local_trajs.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+add_executable(visualize_local_trajs_node src/sando/visualize_local_trajs.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/hybrid_astar.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
 target_link_libraries(visualize_local_trajs_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(visualize_local_trajs_node rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
-add_executable(temporal_layered_corridor_test_node src/sando/temporal_layered_corridor_test_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
+add_executable(temporal_layered_corridor_test_node src/sando/temporal_layered_corridor_test_node.cpp src/sando/sando.cpp src/hgp/hgp_manager.cpp src/hgp/hybrid_astar.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/sando/utils.cpp ${SANDO_SOLVER_SOURCES})
 target_link_libraries(temporal_layered_corridor_test_node ${SANDO_SOLVER_LIBRARIES} ${PCL_LIBRARIES})
 ament_target_dependencies(temporal_layered_corridor_test_node rclcpp visualization_msgs std_msgs geometry_msgs Eigen3 decomp_util decomp_ros_msgs decomp_rviz_plugins decomp_test_node tf2 tf2_ros tf2_geometry_msgs tf2_eigen std_srvs pcl_ros pcl_conversions sensor_msgs dynus_interfaces)
 
@@ -309,6 +313,7 @@ install(TARGETS
   fake_sim
   obstacle_tracker_node
   convert_goal_to_cmd_vel
+  ackermann_controller
   convert_odom_to_state
   odom_to_global_state
   convert_vicon_to_state

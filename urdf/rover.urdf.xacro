@@ -1,0 +1,152 @@
+<?xml version="1.0"?>
+<!-- Ackermann-steered rover for Gazebo Sim (vehicle:=ackermann sim_env:=gazebo):
+     - rear-wheel drive, front-wheel steering (gz AckermannSteering), driven by <namespace>/cmd_vel
+       (geometry_msgs/Twist: forward speed, yaw rate) from ackermann_controller
+     - ground-truth odometry in the world frame (gz OdometryPublisher) on <namespace>/odometry_gt,
+       turned into SANDO's state and the map -> <namespace>/base_link TF by convert_odom_to_state
+     - Livox Mid-360 (gpu_lidar approximation) on top, level
+     Geometry matches config/sando_ackermann.yaml: wheelbase 0.5 m, max steering 30 deg,
+     footprint 0.8 m x 0.6 m (body plus wheels). -->
+<robot name="rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="namespace" default="NX01" />
+  <xacro:arg name="gazebo" default="gz" />
+  <xacro:property name="ns" value="$(arg namespace)" />
+
+  <xacro:property name="body_l" value="0.8" />
+  <xacro:property name="body_w" value="0.42" />
+  <xacro:property name="body_h" value="0.18" />
+  <xacro:property name="body_mass" value="8.0" />
+  <xacro:property name="wheel_r" value="0.12" />
+  <xacro:property name="wheel_t" value="0.08" />
+  <xacro:property name="wheel_mass" value="0.5" />
+  <xacro:property name="wheelbase" value="0.5" />
+  <xacro:property name="track" value="0.5" />        <!-- wheel centre to wheel centre -->
+  <xacro:property name="wheel_z" value="-0.06" />    <!-- wheel centres below base_link -->
+  <xacro:property name="max_steer" value="0.5236" /> <!-- 30 deg -->
+
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertia ixx="${m*(y*y+z*z)/12}" ixy="0" ixz="0" iyy="${m*(x*x+z*z)/12}" iyz="0"
+             izz="${m*(x*x+y*y)/12}" />
+  </xacro:macro>
+
+  <!-- Body -->
+  <link name="base_link">
+    <inertial>
+      <mass value="${body_mass}" />
+      <origin xyz="0 0 0" />
+      <xacro:box_inertia m="${body_mass}" x="${body_l}" y="${body_w}" z="${body_h}" />
+    </inertial>
+    <visual>
+      <geometry><box size="${body_l} ${body_w} ${body_h}" /></geometry>
+      <material name="rover_blue"><color rgba="0.16 0.47 0.84 1" /></material>
+    </visual>
+    <collision>
+      <geometry><box size="${body_l} ${body_w} ${body_h}" /></geometry>
+    </collision>
+  </link>
+
+  <xacro:macro name="wheel" params="name">
+    <link name="${name}">
+      <inertial>
+        <mass value="${wheel_mass}" />
+        <inertia ixx="${wheel_mass*(3*wheel_r*wheel_r+wheel_t*wheel_t)/12}" ixy="0" ixz="0"
+                 iyy="${wheel_mass*wheel_r*wheel_r/2}" iyz="0"
+                 izz="${wheel_mass*(3*wheel_r*wheel_r+wheel_t*wheel_t)/12}" />
+      </inertial>
+      <visual>
+        <origin rpy="${pi/2} 0 0" />
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_t}" /></geometry>
+        <material name="rover_black"><color rgba="0.1 0.1 0.1 1" /></material>
+      </visual>
+      <collision>
+        <origin rpy="${pi/2} 0 0" />
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_t}" /></geometry>
+      </collision>
+    </link>
+    <gazebo reference="${name}">
+      <mu1>1.0</mu1>
+      <mu2>1.0</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <!-- Rear (driven) wheels -->
+  <xacro:macro name="rear_wheel" params="side y">
+    <xacro:wheel name="rear_${side}_wheel" />
+    <joint name="rear_${side}_wheel_joint" type="continuous">
+      <parent link="base_link" />
+      <child link="rear_${side}_wheel" />
+      <origin xyz="${-wheelbase/2} ${y} ${wheel_z}" />
+      <axis xyz="0 1 0" />
+    </joint>
+  </xacro:macro>
+  <xacro:rear_wheel side="left" y="${track/2}" />
+  <xacro:rear_wheel side="right" y="${-track/2}" />
+
+  <!-- Front (steered) wheels: steering knuckle about z, then the wheel about y -->
+  <xacro:macro name="front_wheel" params="side y">
+    <link name="front_${side}_steer">
+      <inertial>
+        <mass value="0.2" />
+        <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4" />
+      </inertial>
+    </link>
+    <joint name="front_${side}_steer_joint" type="revolute">
+      <parent link="base_link" />
+      <child link="front_${side}_steer" />
+      <origin xyz="${wheelbase/2} ${y} ${wheel_z}" />
+      <axis xyz="0 0 1" />
+      <limit lower="${-max_steer}" upper="${max_steer}" effort="25" velocity="3.0" />
+    </joint>
+    <xacro:wheel name="front_${side}_wheel" />
+    <joint name="front_${side}_wheel_joint" type="continuous">
+      <parent link="front_${side}_steer" />
+      <child link="front_${side}_wheel" />
+      <axis xyz="0 1 0" />
+    </joint>
+  </xacro:macro>
+  <xacro:front_wheel side="left" y="${track/2}" />
+  <xacro:front_wheel side="right" y="${-track/2}" />
+
+  <!-- Lidar: level on top at the front; its lowest beams (-7 deg) see the planning band from about
+       1.9 m out in every direction (the mapper clears the blind zone closer than that) -->
+  <xacro:include filename="$(find sando)/urdf/_mid360.gz.xacro" />
+  <xacro:mid360 name="${ns}_livox" namespace="${ns}" parent="base_link" topic="mid360">
+    <origin xyz="0.3 0 ${body_h/2 + 0.08}" rpy="0 0 0" />
+  </xacro:mid360>
+
+  <gazebo>
+    <plugin filename="gz-sim-ackermann-steering-system" name="gz::sim::systems::AckermannSteering">
+      <left_joint>rear_left_wheel_joint</left_joint>
+      <right_joint>rear_right_wheel_joint</right_joint>
+      <left_steering_joint>front_left_steer_joint</left_steering_joint>
+      <right_steering_joint>front_right_steer_joint</right_steering_joint>
+      <kingpin_width>${track}</kingpin_width>
+      <steering_limit>${max_steer}</steering_limit>
+      <wheel_base>${wheelbase}</wheel_base>
+      <wheel_separation>${track}</wheel_separation>
+      <wheel_radius>${wheel_r}</wheel_radius>
+      <min_velocity>-2.5</min_velocity>
+      <max_velocity>2.5</max_velocity>
+      <min_acceleration>-3.0</min_acceleration>
+      <max_acceleration>3.0</max_acceleration>
+      <topic>/${ns}/cmd_vel</topic>
+      <!-- Its wheel odometry starts at zero; SANDO uses the ground truth below -->
+      <odom_topic>/${ns}/wheel_odometry</odom_topic>
+      <tf_topic>/${ns}/wheel_odometry_tf</tf_topic>
+      <frame_id>${ns}/odom</frame_id>
+      <child_frame_id>${ns}/base_link</child_frame_id>
+    </plugin>
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>${ns}/base_link</robot_base_frame>
+      <odom_topic>/${ns}/odometry_gt</odom_topic>
+      <tf_topic>/${ns}/odometry_gt_tf</tf_topic>
+      <odom_publish_frequency>100</odom_publish_frequency>
+      <dimensions>3</dimensions>
+    </plugin>
+    <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+      <topic>/${ns}/joint_states</topic>
+    </plugin>
+  </gazebo>
+</robot>
