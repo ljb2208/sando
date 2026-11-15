@@ -326,10 +326,31 @@ overhangs above it are ignored. `ackermann_controller` tracks the trajectory and
 (speed and the yaw rate the steering produces) and `steering_angle`; in simulation `fake_sim`
 drives a kinematic bicycle model with it. Parameters: `config/sando_ackermann.yaml`.
 
+From `~/sando_ws/src/sando`:
+
 ```bash
-python3 scripts/run_sim.py --mode dynamic --vehicle ackermann       # fake_sim (bicycle model)
-python3 scripts/run_sim.py --mode static -d hard --vehicle ackermann # Gazebo forest, real physics
+# fake_sim: kinematic bicycle model among moving and static obstacles (no Gazebo)
+python3 scripts/run_sim.py --mode dynamic --difficulty easy --vehicle ackermann -s ~/sando_ws/install/setup.bash
+
+# Gazebo: physical rover in a forest (--difficulty easy | medium | hard)
+python3 scripts/run_sim.py --mode static --difficulty hard --vehicle ackermann -s ~/sando_ws/install/setup.bash
 ```
+
+Useful extra flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--gazebo-gui` | Show the Gazebo window (off by default) |
+| `--no-rviz` | Do not start RViz |
+| `--web` | Start the web interface at <http://localhost:8080> (`--web-port` to change) |
+| `--solver gurobi` / `--solver highs_shot` | Trajectory solver (default `auto`: Gurobi if built) |
+| `--ros-domain-id N` | ROS domain (default 20); use another one when a second SANDO simulation runs on the same machine or network, otherwise they exchange state and goals |
+
+The goal (x = 105) is sent automatically; send others with RViz's 2D Goal Pose or the web
+interface's goal form. `./build.sh -p "sando global_mapper_ros"` builds and installs the rover
+configuration and the mapper changes it uses (rebuild after editing them). With
+`--solver highs_shot`, install the SHOT fork with its rootsearch fix (`sudo make install` in its
+build directory), or the parallel solves run one at a time.
 
 In Gazebo (`--mode static`/`gazebo`) the rover is a physical model (`urdf/rover.urdf.xacro`):
 rear-wheel drive and front steering through Gazebo's AckermannSteering system, driven by the
