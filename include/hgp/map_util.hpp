@@ -480,88 +480,163 @@ class MapUtil {
 
         const int dim0 = dim_(0);
         const int dim1 = dim_(1);
-        const int plane = dim0 * dim1;
+        const int dim2 = dim_(2);
+        const size_t plane = size_t(dim0) * size_t(dim1);
 
-#pragma omp parallel for schedule(static)
-        for (int idx = 0; idx < total_size_; ++idx) {
-          // Heat is only relevant for traversable cells; skip hard obstacles unless soft-cost mode
-          if (map_[idx] > val_free_ && !use_soft_cost_obstacles_) continue;
-
-          const int ix = idx % dim0;
-          const int iy = (idx / dim0) % dim1;
-          const int iz = idx / plane;
-
-          const float xw = origin_d_.x() + (ix + 0.5f) * res_;
-          const float yw = origin_d_.y() + (iy + 0.5f) * res_;
-          const float zw = origin_d_.z() + (iz + 0.5f) * res_;
-
-          float best = 0.0f;
-
-          for (size_t k = 0; k < K; ++k) {
-            // Base reachable radius (finite horizon)
-            float Hbase = 0.0f;
-            const float Rreach = Rreach_list[k];
-            if (Rreach > 1e-6f) {
-              const Eigen::Vector3f& ck = ck_list[k];
-              const Eigen::Vector3f& hk = hk_list[k];
-
-              // Compute distance from point to box (0 if inside, positive if outside)
-              const float dx_abs = std::abs(xw - ck.x());
-              const float dy_abs = std::abs(yw - ck.y());
-              const float dz_abs = std::abs(zw - ck.z());
-
-              const float dx_box = std::max(0.0f, dx_abs - hk.x());
-              const float dy_box = std::max(0.0f, dy_abs - hk.y());
-              const float dz_box = std::max(0.0f, dz_abs - hk.z());
-
-              const float d2 = dx_box * dx_box + dy_box * dy_box + dz_box * dz_box;
-              const float R2 = Rreach * Rreach;
-
-              if (d2 <= R2) {
-                const float d = std::sqrt(std::max(0.0f, d2));
-                const float u = std::min(1.0f, std::max(0.0f, d / Rreach));
-                Hbase = heat_alpha0_ * pow_fast(1.0f - u, heat_p_);
-              }
-            }
-
-            // Tube bonus (max over time), bbox + growing margin with time, time-decayed
-            float tube_max = 0.0f;
-            const Eigen::Vector3f* cj_ptr = &cj_flat[k * J];
+        // Heat of obstacle k at a cell centre (max over its reachable box and its predicted tube)
+        auto obstacleHeat = [&](size_t k, float xw, float yw, float zw) -> float {
+          // Base reachable radius (finite horizon)
+          float Hbase = 0.0f;
+          const float Rreach = Rreach_list[k];
+          if (Rreach > 1e-6f) {
+            const Eigen::Vector3f& ck = ck_list[k];
             const Eigen::Vector3f& hk = hk_list[k];
 
-            for (size_t j = 0; j < J; ++j) {
-              const float R = Rj[j];
-              if (R <= 1e-6f) continue;
+            // Compute distance from point to box (0 if inside, positive if outside)
+            const float dx_abs = std::abs(xw - ck.x());
+            const float dy_abs = std::abs(yw - ck.y());
+            const float dz_abs = std::abs(zw - ck.z());
 
-              const Eigen::Vector3f& cj = cj_ptr[j];
+            const float dx_box = std::max(0.0f, dx_abs - hk.x());
+            const float dy_box = std::max(0.0f, dy_abs - hk.y());
+            const float dz_box = std::max(0.0f, dz_abs - hk.z());
 
-              // Distance from point to box at predicted position
-              const float dx_abs = std::abs(xw - cj.x());
-              const float dy_abs = std::abs(yw - cj.y());
-              const float dz_abs = std::abs(zw - cj.z());
+            const float d2 = dx_box * dx_box + dy_box * dy_box + dz_box * dz_box;
+            const float R2 = Rreach * Rreach;
 
-              const float dx_box = std::max(0.0f, dx_abs - hk.x());
-              const float dy_box = std::max(0.0f, dy_abs - hk.y());
-              const float dz_box = std::max(0.0f, dz_abs - hk.z());
-
-              const float d2 = dx_box * dx_box + dy_box * dy_box + dz_box * dz_box;
-              const float R2 = R * R;
-
-              if (d2 > R2) continue;
-
+            if (d2 <= R2) {
               const float d = std::sqrt(std::max(0.0f, d2));
-              const float u = std::min(1.0f, std::max(0.0f, d / R));
-              const float g = pow_fast(1.0f - u, heat_q_);
-              tube_max = std::max(tube_max, Wj[j] * g);
+              const float u = std::min(1.0f, std::max(0.0f, d / Rreach));
+              Hbase = heat_alpha0_ * pow_fast(1.0f - u, heat_p_);
             }
-
-            float Hk = Hbase + heat_alpha1_ * tube_max;
-            if (heat_Hmax_ > 0.0f) Hk = std::min(Hk, heat_Hmax_);
-
-            best = std::max(best, Hk);
           }
 
-          heat_[idx] = std::max(heat_[idx], best);
+          // Tube bonus (max over time), bbox + growing margin with time, time-decayed
+          float tube_max = 0.0f;
+          const Eigen::Vector3f* cj_ptr = &cj_flat[k * J];
+          const Eigen::Vector3f& hk = hk_list[k];
+
+          for (size_t j = 0; j < J; ++j) {
+            const float R = Rj[j];
+            if (R <= 1e-6f) continue;
+
+            const Eigen::Vector3f& cj = cj_ptr[j];
+
+            // Distance from point to box at predicted position
+            const float dx_abs = std::abs(xw - cj.x());
+            const float dy_abs = std::abs(yw - cj.y());
+            const float dz_abs = std::abs(zw - cj.z());
+
+            const float dx_box = std::max(0.0f, dx_abs - hk.x());
+            const float dy_box = std::max(0.0f, dy_abs - hk.y());
+            const float dz_box = std::max(0.0f, dz_abs - hk.z());
+
+            const float d2 = dx_box * dx_box + dy_box * dy_box + dz_box * dz_box;
+            const float R2 = R * R;
+
+            if (d2 > R2) continue;
+
+            const float d = std::sqrt(std::max(0.0f, d2));
+            const float u = std::min(1.0f, std::max(0.0f, d / R));
+            const float g = pow_fast(1.0f - u, heat_q_);
+            tube_max = std::max(tube_max, Wj[j] * g);
+          }
+
+          float Hk = Hbase + heat_alpha1_ * tube_max;
+          if (heat_Hmax_ > 0.0f) Hk = std::min(Hk, heat_Hmax_);
+          return Hk;
+        };
+
+        // Obstacle k's heat is exactly 0 farther than Rreach from its current box and than Rj
+        // from its predicted boxes, so only the cells in that index range (plus one cell for
+        // rounding) are visited, instead of every cell of the map for every obstacle
+        struct CellBox {
+          size_t k;
+          int lo[3], hi[3];
+        };
+        std::vector<CellBox> boxes;
+        boxes.reserve(K);
+        const int dims[3] = {dim0, dim1, dim2};
+        for (size_t k = 0; k < K; ++k) {
+          float wlo[3], whi[3];
+          bool any = false;
+          auto grow = [&](const Eigen::Vector3f& c, float R) {
+            for (int ax = 0; ax < 3; ++ax) {
+              const float lo = c(ax) - hk_list[k](ax) - R, hi = c(ax) + hk_list[k](ax) + R;
+              wlo[ax] = any ? std::min(wlo[ax], lo) : lo;
+              whi[ax] = any ? std::max(whi[ax], hi) : hi;
+            }
+            any = true;
+          };
+          if (Rreach_list[k] > 1e-6f) grow(ck_list[k], Rreach_list[k]);
+          for (size_t j = 0; j < J; ++j)
+            if (Rj[j] > 1e-6f) grow(cj_flat[k * J + j], Rj[j]);
+          if (!any) continue;
+
+          CellBox b{k, {}, {}};
+          bool empty = false;
+          for (int ax = 0; ax < 3; ++ax) {
+            // Cell i has centre origin + (i + 0.5) * res
+            const float o = origin_d_(ax);
+            b.lo[ax] = std::max(0, int(std::floor((wlo[ax] - o) / res_ - 0.5f)) - 1);
+            b.hi[ax] = std::min(dims[ax] - 1, int(std::ceil((whi[ax] - o) / res_ - 0.5f)) + 1);
+            if (b.lo[ax] > b.hi[ax]) empty = true;
+          }
+          if (!empty) boxes.push_back(b);
+        }
+
+        if (!boxes.empty()) {
+          int ylo = dim1, yhi = -1, zlo = dim2, zhi = -1;
+          for (const auto& b : boxes) {
+            ylo = std::min(ylo, b.lo[1]);
+            yhi = std::max(yhi, b.hi[1]);
+            zlo = std::min(zlo, b.lo[2]);
+            zhi = std::max(zhi, b.hi[2]);
+          }
+          const int ny = yhi - ylo + 1;
+          const int rows = ny * (zhi - zlo + 1);
+
+#pragma omp parallel
+          {
+            std::vector<const CellBox*> active;
+            active.reserve(boxes.size());
+#pragma omp for schedule(dynamic, 8)
+            for (int row = 0; row < rows; ++row) {
+              const int iy = ylo + row % ny;
+              const int iz = zlo + row / ny;
+
+              // Obstacles reaching this (y, z) row, and the x range they cover
+              active.clear();
+              int xlo = dim0, xhi = -1;
+              for (const auto& b : boxes) {
+                if (iy < b.lo[1] || iy > b.hi[1] || iz < b.lo[2] || iz > b.hi[2]) continue;
+                active.push_back(&b);
+                xlo = std::min(xlo, b.lo[0]);
+                xhi = std::max(xhi, b.hi[0]);
+              }
+              if (active.empty()) continue;
+
+              const float yw = origin_d_.y() + (iy + 0.5f) * res_;
+              const float zw = origin_d_.z() + (iz + 0.5f) * res_;
+              const size_t row_base = size_t(dim0) * iy + plane * iz;
+
+              for (int ix = xlo; ix <= xhi; ++ix) {
+                const size_t idx = row_base + ix;
+                // Heat is only relevant for traversable cells; skip hard obstacles unless
+                // soft-cost mode
+                if (map_[idx] > val_free_ && !use_soft_cost_obstacles_) continue;
+
+                const float xw = origin_d_.x() + (ix + 0.5f) * res_;
+
+                float best = 0.0f;
+                for (const CellBox* b : active) {
+                  if (ix < b->lo[0] || ix > b->hi[0]) continue;
+                  best = std::max(best, obstacleHeat(b->k, xw, yw, zw));
+                }
+                heat_[idx] = std::max(heat_[idx], best);
+              }
+            }
+          }
         }
       }
     }
