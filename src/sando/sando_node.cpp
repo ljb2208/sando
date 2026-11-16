@@ -1005,7 +1005,7 @@ void SANDO_NODE::replanCallback() {
   // For visualization of local_global_path and local_global_path_after_push_
   if (do_viz && hgp_result) publishLocalGlobalPath();
 
-  if (hgp_result && par_.visual_level >= 2) {
+  if (do_viz && hgp_result && par_.visual_level >= 2) {
     publishDynamicHeatCloud();
     publishOccupiedCloud();
   }

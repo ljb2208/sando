@@ -109,6 +109,14 @@ SANDO::SANDO(Parameters par) : par_(par) {
 // ----------------------------------------------------------------------------
 
 void SANDO::updateLiveParameters(const Parameters& par) {
+  // The solvers read these when they are initialized; the other live parameters (horizon, goal
+  // radii, w_max_yawing, visual_level) are only used outside them
+  const bool solver_inputs_changed =
+      par.v_max != par_.v_max || par.a_max != par_.a_max || par.j_max != par_.j_max ||
+      par.w_max != par_.w_max || par.jerk_smooth_weight != par_.jerk_smooth_weight ||
+      par.max_gurobi_comp_time_sec != par_.max_gurobi_comp_time_sec ||
+      par.debug_verbose != par_.debug_verbose;
+
   // Scalars only: other threads (goal timer, state callback) read par_ concurrently
   par_.v_max = par.v_max;
   par_.a_max = par.a_max;
@@ -128,7 +136,8 @@ void SANDO::updateLiveParameters(const Parameters& par) {
   j_max_3d_ = Eigen::Vector3d(par_.j_max, par_.j_max, par_.j_max);
 
   // The solvers take the limits and weights when they are initialized, so rebuild them (as
-  // after a solver error). Same count, so ellip_workers_ still matches.
+  // after a solver error) when one of those changed. Same count, so ellip_workers_ still matches.
+  if (!solver_inputs_changed) return;
   for (auto& solver : whole_traj_solver_ptrs_) {
     solver = createTrajSolver(par_.solver);
     solver->setGurobiThreads(grb_threads_per_solver_);
