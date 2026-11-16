@@ -307,6 +307,10 @@ class SANDO_NODE : public rclcpp::Node {
 
   // Subscribers
   rclcpp::Subscription<dynus_interfaces::msg::DynTraj>::SharedPtr sub_traj_;
+  // Compiled analytic trajectory per obstacle id, reused while its expressions are unchanged
+  // (trajCallback runs in a reentrant group, hence the mutex)
+  std::mutex mtx_analytic_cache_;
+  std::unordered_map<int, std::shared_ptr<const AnalyticExpr>> analytic_cache_;
   rclcpp::Subscription<dynus_interfaces::msg::DynTraj>::SharedPtr sub_predicted_traj_;
   rclcpp::Subscription<dynus_interfaces::msg::State>::SharedPtr sub_state_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_terminal_goal_;

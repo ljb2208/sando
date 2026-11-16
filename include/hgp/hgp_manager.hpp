@@ -25,6 +25,7 @@
 #include <hgp/utils.hpp>
 
 // Other includes
+#include <atomic>
 #include <mutex>
 #include <Eigen/Dense>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -38,6 +39,9 @@ using std::placeholders::_3;
 
 class HGPManager {
  public:
+  /** @brief Unknown voxels of a base point set and their boundary (defined in the .cpp). */
+  struct UnknownBoundary;
+
   /** @brief Default constructor. */
   HGPManager();
 
@@ -211,7 +215,8 @@ class HGPManager {
       const vec_Vecf<3>& obst_bbox,
       const std::vector<double>& seg_end_times,
       std::vector<LinearConstraint3D>& l_constraints,
-      vec_E<Polyhedron<3>>& poly_out);
+      vec_E<Polyhedron<3>>& poly_out,
+      std::shared_ptr<const UnknownBoundary> unknown_boundary = nullptr);
 
   /** @brief Compute time-layered convex decomposition for temporal safety corridors.
    *  @param ellip Per-worker ellipsoid decomposition utility.
@@ -222,6 +227,8 @@ class HGPManager {
    *  @param time_end_times End times for each time layer (size N).
    *  @param l_constraints_by_time Output linear constraints indexed [N][P].
    *  @param poly_out_by_time Output polyhedra indexed [N][P].
+   *  @param unknown_boundary Unknown boundary of base_uo (extracted here when null).
+   *  @param cancel When set, stop at the next time layer and return false.
    *  @return True if decomposition succeeded for all time layers and segments.
    */
   bool cvxEllipsoidDecompTimeLayered(
@@ -232,7 +239,15 @@ class HGPManager {
       const vec_Vecf<3>& obst_bbox,
       const std::vector<double>& time_end_times,
       std::vector<std::vector<LinearConstraint3D>>& l_constraints_by_time,
-      std::vector<vec_E<Polyhedron<3>>>& poly_out_by_time);
+      std::vector<vec_E<Polyhedron<3>>>& poly_out_by_time,
+      std::shared_ptr<const UnknownBoundary> unknown_boundary = nullptr,
+      const std::atomic<bool>* cancel = nullptr);
+
+  /** @brief Extract the unknown voxels of base_uo and their boundary, for sharing between
+   *  decompositions of the same base points (it does not depend on the inflation radius).
+   *  Empty when inflate_unknown_boundary is off.
+   */
+  std::shared_ptr<const UnknownBoundary> extractUnknownBoundary(const vec_Vec3f& base_uo) const;
 
   /** @brief Set predicted trajectory samples for dynamic obstacles used in heat map computation.
    *  @param pred_samples Predicted position samples per obstacle, aligned with pred_times.
@@ -247,12 +262,14 @@ class HGPManager {
    *  @param obst_pos Dynamic obstacle positions.
    *  @param obst_bbox Dynamic obstacle bounding box half-extents.
    *  @param traj_max_time Time horizon for motion-based inflation radius.
+   *  @param unknown Unknown boundary of pts (extracted from pts when null).
    */
   void obstacle_to_vec(
       vec_Vec3f& pts,
       const vec_Vecf<3>& obst_pos,
       const vec_Vecf<3>& obst_bbox,
-      double traj_max_time);
+      double traj_max_time,
+      const UnknownBoundary* unknown = nullptr);
 
   /** @brief Check whether a point lies in a free voxel.
    *  @param point Query position in world coordinates.

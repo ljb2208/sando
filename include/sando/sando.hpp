@@ -30,6 +30,7 @@
 #include "hgp/hybrid_astar.hpp"
 #include "hgp/termcolor.hpp"
 #include "sando/sando_type.hpp"
+#include "sando/worker_pool.hpp"
 #include "timer.hpp"
 
 enum { MAP = 0, UNKNOWN_MAP = 1 };
@@ -391,6 +392,9 @@ class SANDO {
    * environments.
    *  @param precomputed_spatial_poly_out Optional precomputed spatial polytopes for static
    * environments.
+   *  @param unknown_boundary Unknown boundary of base_uo shared by this replan's attempts
+   * (extracted per call when null).
+   *  @param cancel Set when another attempt has succeeded: abandon this one at the next check.
    *  @return True if the trajectory optimization succeeded.
    */
   bool generateLocalTrajectory(
@@ -410,7 +414,9 @@ class SANDO {
       const vec_Vec3f& base_uo,
       vec_E<Polyhedron<3>>& poly_out_safe,
       const std::vector<LinearConstraint3D>* precomputed_spatial_constraints = nullptr,
-      const vec_E<Polyhedron<3>>* precomputed_spatial_poly_out = nullptr);
+      const vec_E<Polyhedron<3>>* precomputed_spatial_poly_out = nullptr,
+      std::shared_ptr<const HGPManager::UnknownBoundary> unknown_boundary = nullptr,
+      const std::atomic<bool>* cancel = nullptr);
 
   /** @brief Resets all internal timing, polytope, and trajectory data for a new replan cycle. */
   void resetData();
@@ -722,4 +728,5 @@ class SANDO {
 
   // decomp ellip workers for each thread
   std::vector<EllipsoidDecomp3D> ellip_workers_;
+  std::unique_ptr<sando::WorkerPool> attempt_pool_;  // threads for the parallel attempts
 };

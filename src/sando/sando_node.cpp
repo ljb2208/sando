@@ -1275,15 +1275,9 @@ void SANDO_NODE::convertDynTrajMsg2DynTraj(
     traj->traj_vy = "0.0";
     traj->traj_vz = "0.0";
 
-    // Compile as stationary point
-    if (traj->compileAnalytic()) {
-      traj->mode = DynTraj::Mode::Analytic;
-    } else {
-      RCLCPP_WARN(
-          this->get_logger(),
-          "Failed to compile stationary trajectory for obstacle id=%d at pos=[%.2f, %.2f, %.2f]",
-          msg.id, msg.pos.x, msg.pos.y, msg.pos.z);
-    }
+    // Stationary point: a constant position, no expression to compile
+    traj->setAnalytic(
+        AnalyticExpr::makeConstant(Eigen::Vector3d(msg.pos.x, msg.pos.y, msg.pos.z)));
   }
 
   // Get covariances (skip if only using current position for obstacles)
@@ -1308,9 +1302,27 @@ void SANDO_NODE::convertDynTrajMsg2DynTraj(
     }
 
     if (msg.function.size() == 3 && msg.velocity.size() == 3) {
-      if (traj->compileAnalytic()) {
+      // Obstacles resend the same expressions in every message: reuse the compiled form while
+      // the strings are unchanged (compiling costs milliseconds, evaluating microseconds)
+      std::shared_ptr<const AnalyticExpr> cached;
+      {
+        std::lock_guard<std::mutex> lk(mtx_analytic_cache_);
+        auto it = analytic_cache_.find(msg.id);
+        if (it != analytic_cache_.end() &&
+            it->second->sameSource(
+                traj->traj_x, traj->traj_y, traj->traj_z, traj->traj_vx, traj->traj_vy,
+                traj->traj_vz))
+          cached = it->second;
+      }
+
+      if (cached) {
+        traj->setAnalytic(cached);
+      } else if (traj->compileAnalytic()) {
         // Change the mode only when we successfully compiled the analytic trajectory
         traj->mode = DynTraj::Mode::Analytic;
+        std::lock_guard<std::mutex> lk(mtx_analytic_cache_);
+        if (analytic_cache_.size() > 4096) analytic_cache_.clear();  // bound stale ids
+        analytic_cache_[msg.id] = traj->analytic;
       } else {
         RCLCPP_ERROR(
             this->get_logger(), "Failed to compile analytic traj id=%d, falling back to zeros.",

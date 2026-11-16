@@ -4041,19 +4041,16 @@ void SolverHighsShot::createSafeCorridorConstraintsForPolytopeAtleastOne(int t) 
   at_least_1_pol_cons_.push_back(
       m_.addConstr(sum >= 1, "At_least_1_pol_t_" + std::to_string(t)));  // at least in one polytope
 
-  std::vector<LinExpr> cp0 = getCP0(t);
-  std::vector<LinExpr> cp1 = getCP1(t);
-  std::vector<LinExpr> cp2 = getCP2(t);
-  std::vector<LinExpr> cp3 = getCP3(t);
+  // Control points 0..3 of segment t, per axis
+  const std::vector<LinExpr> cps[4] = {getCP0(t), getCP1(t), getCP2(t), getCP3(t)};
 
   // Loop over the number of polytopes
   const int P = numSpatialPolys_();
 
   for (int p = 0; p < P; ++p) {
     const auto& poly = polyAt_(t, p);
-
-    Eigen::MatrixXd A1 = poly.A();
-    auto bb = poly.b();
+    const Eigen::MatrixXd& A1 = poly.A();
+    const auto& bb = poly.b();
 
     // Empty polytope (invalid decomposition): disable this binary so the
     // solver cannot assign the trajectory to a non-existent corridor.
@@ -4063,29 +4060,18 @@ void SolverHighsShot::createSafeCorridorConstraintsForPolytopeAtleastOne(int t) 
       continue;
     }
 
-    std::vector<std::vector<double>> A1std = eigenMatrix2std(A1);
-    std::vector<LinExpr> Acp0 = MatrixMultiply(A1std, cp0);
-    std::vector<LinExpr> Acp1 = MatrixMultiply(A1std, cp1);
-    std::vector<LinExpr> Acp2 = MatrixMultiply(A1std, cp2);
-    std::vector<LinExpr> Acp3 = MatrixMultiply(A1std, cp3);
-
+    // b_[t][p] = 1  =>  A * cp_k <= b for the 4 control points of segment t. Each row is built
+    // by appending the scaled control point terms (no temporary expressions)
+    const std::string prefix = "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p);
     for (int i = 0; i < bb.rows(); i++) {
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp0[i], hs::kLessEqual, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp0"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp1[i], hs::kLessEqual, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp1"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp2[i], hs::kLessEqual, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp2"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp3[i], hs::kLessEqual, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp3"));
+      for (int k = 0; k < 4; ++k) {
+        LinExpr row;
+        row.reserve(cps[k][0].size() + cps[k][1].size() + cps[k][2].size());
+        for (int ax = 0; ax < 3; ++ax) row.addScaled(cps[k][ax], A1(i, ax));
+        miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
+            b_[t][p], 1, row, hs::kLessEqual, bb[i],
+            prefix + "_face" + std::to_string(i) + "_cp" + std::to_string(k)));
+      }
     }
   }
 }
@@ -4781,6 +4767,7 @@ bool SolverHighsShot::generateNewTrajectory(
     setPolytopesConstraints();
     auto t3 = clk::now();
     last_solve_timing_.polytopes_ms = 1e3 * dur(t3 - t2).count();
+    if (cb_.should_terminate_) return false;  // another attempt succeeded meanwhile
 
     setDynamicConstraints();
     auto t4 = clk::now();

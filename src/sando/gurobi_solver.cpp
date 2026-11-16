@@ -12,6 +12,51 @@
 #include <sando/gurobi_solver.hpp>
 #include <sando/gurobi_solver_utils.hpp>
 
+namespace {
+// Terms of a linear expression: the corridor constraints combine the same control point
+// expressions with many different face normals, which is much cheaper on plain arrays than
+// through GRBLinExpr arithmetic (every operator allocates a new expression)
+struct LinTerms {
+  std::vector<GRBVar> vars;
+  std::vector<double> coeffs;
+  double constant = 0.0;
+};
+
+LinTerms toTerms(const GRBLinExpr& e) {
+  LinTerms t;
+  const unsigned n = e.size();
+  t.vars.reserve(n);
+  t.coeffs.reserve(n);
+  for (unsigned i = 0; i < n; ++i) {
+    t.vars.push_back(e.getVar(i));
+    t.coeffs.push_back(e.getCoeff(i));
+  }
+  t.constant = e.getConstant();
+  return t;
+}
+
+// out = a[0]*x + a[1]*y + a[2]*z without their constants, which are returned (to go to the rhs)
+double combineTerms(
+    const LinTerms (&xyz)[3],
+    const double (&a)[3],
+    std::vector<double>& cbuf,
+    std::vector<GRBVar>& vbuf,
+    GRBLinExpr& out) {
+  cbuf.clear();
+  vbuf.clear();
+  double constant = 0.0;
+  for (int ax = 0; ax < 3; ++ax) {
+    const LinTerms& t = xyz[ax];
+    for (size_t j = 0; j < t.coeffs.size(); ++j) cbuf.push_back(a[ax] * t.coeffs[j]);
+    vbuf.insert(vbuf.end(), t.vars.begin(), t.vars.end());
+    constant += a[ax] * t.constant;
+  }
+  out = GRBLinExpr();
+  out.addTerms(cbuf.data(), vbuf.data(), static_cast<int>(cbuf.size()));
+  return constant;
+}
+}  // namespace
+
 void MyCallback::callback() {  // This function is called periodically along the optimization
                                // process.
   //  It is called several times more after terminating the program
@@ -4043,19 +4088,23 @@ void SolverGurobi::createSafeCorridorConstraintsForPolytopeAtleastOne(int t) {
   at_least_1_pol_cons_.push_back(
       m_.addConstr(sum >= 1, "At_least_1_pol_t_" + std::to_string(t)));  // at least in one polytope
 
-  std::vector<GRBLinExpr> cp0 = getCP0(t);
-  std::vector<GRBLinExpr> cp1 = getCP1(t);
-  std::vector<GRBLinExpr> cp2 = getCP2(t);
-  std::vector<GRBLinExpr> cp3 = getCP3(t);
+  // Control points 0..3 of segment t, per axis, as term lists
+  const std::vector<GRBLinExpr> cps[4] = {getCP0(t), getCP1(t), getCP2(t), getCP3(t)};
+  LinTerms terms[4][3];
+  for (int k = 0; k < 4; ++k)
+    for (int ax = 0; ax < 3; ++ax) terms[k][ax] = toTerms(cps[k][ax]);
+
+  std::vector<double> cbuf;
+  std::vector<GRBVar> vbuf;
+  GRBLinExpr lhs;
 
   // Loop over the number of polytopes
   const int P = numSpatialPolys_();
 
   for (int p = 0; p < P; ++p) {
     const auto& poly = polyAt_(t, p);
-
-    Eigen::MatrixXd A1 = poly.A();
-    auto bb = poly.b();
+    const Eigen::MatrixXd& A1 = poly.A();
+    const auto& bb = poly.b();
 
     // Empty polytope (invalid decomposition): disable this binary so the
     // solver cannot assign the trajectory to a non-existent corridor.
@@ -4065,29 +4114,17 @@ void SolverGurobi::createSafeCorridorConstraintsForPolytopeAtleastOne(int t) {
       continue;
     }
 
-    std::vector<std::vector<double>> A1std = eigenMatrix2std(A1);
-    std::vector<GRBLinExpr> Acp0 = MatrixMultiply(A1std, cp0);
-    std::vector<GRBLinExpr> Acp1 = MatrixMultiply(A1std, cp1);
-    std::vector<GRBLinExpr> Acp2 = MatrixMultiply(A1std, cp2);
-    std::vector<GRBLinExpr> Acp3 = MatrixMultiply(A1std, cp3);
-
+    // b_[t][p] = 1  =>  A * cp_k <= b for the 4 control points of segment t. Each row is built
+    // from the term lists in one addTerms call (GRBLinExpr arithmetic allocates per operation)
+    const std::string prefix = "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p);
     for (int i = 0; i < bb.rows(); i++) {
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp0[i], GRB_LESS_EQUAL, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp0"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp1[i], GRB_LESS_EQUAL, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp1"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp2[i], GRB_LESS_EQUAL, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp2"));
-      miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
-          b_[t][p], 1, Acp3[i], GRB_LESS_EQUAL, bb[i],
-          "safe_corridor_t" + std::to_string(t) + "_p" + std::to_string(p) + "_face" +
-              std::to_string(i) + "_cp3"));
+      const double a[3] = {A1(i, 0), A1(i, 1), A1(i, 2)};
+      for (int k = 0; k < 4; ++k) {
+        const double c = combineTerms(terms[k], a, cbuf, vbuf, lhs);
+        miqp_polytopes_cons_.push_back(m_.addGenConstrIndicator(
+            b_[t][p], 1, lhs, GRB_LESS_EQUAL, bb[i] - c,
+            prefix + "_face" + std::to_string(i) + "_cp" + std::to_string(k)));
+      }
     }
   }
 }
@@ -4783,6 +4820,7 @@ bool SolverGurobi::generateNewTrajectory(
     setPolytopesConstraints();
     auto t3 = clk::now();
     last_solve_timing_.polytopes_ms = 1e3 * dur(t3 - t2).count();
+    if (cb_.should_terminate_) return false;  // another attempt succeeded meanwhile
 
     setDynamicConstraints();
     auto t4 = clk::now();

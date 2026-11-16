@@ -95,6 +95,14 @@ class LinExpr {
   LinExpr& operator*=(double factor);
   LinExpr& operator/=(double divisor);
 
+  /** @brief Append factor * other (terms and constant), without temporaries. */
+  void addScaled(const LinExpr& other, double factor);
+  /** @brief Reserve room for n variable terms. */
+  void reserve(size_t n) {
+    vars_.reserve(n);
+    coeffs_.reserve(n);
+  }
+
   /** @brief Number of (possibly repeated) variable terms. */
   size_t size() const { return vars_.size(); }
   int getVarIndex(size_t i) const { return vars_[i]; }

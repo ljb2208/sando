@@ -130,6 +130,16 @@ LinExpr& LinExpr::operator+=(const LinExpr& other) {
   return *this;
 }
 
+void LinExpr::addScaled(const LinExpr& other, double factor) {
+  if (&other == this) {
+    *this *= (1.0 + factor);
+    return;
+  }
+  vars_.insert(vars_.end(), other.vars_.begin(), other.vars_.end());
+  for (double c : other.coeffs_) coeffs_.push_back(factor * c);
+  constant_ += factor * other.constant_;
+}
+
 LinExpr& LinExpr::operator-=(const LinExpr& other) {
   if (&other == this) return *this *= 0.0;
   vars_.insert(vars_.end(), other.vars_.begin(), other.vars_.end());

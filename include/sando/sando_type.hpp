@@ -11,6 +11,9 @@
 #include <algorithm>  // for std::clamp
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
 #include <vector>
 #include <Eigen/Core>
 #include <sim/exprtk.hpp>
@@ -741,6 +744,107 @@ struct PieceWisePol {
   }
 };
 
+/** @brief Compiled analytic (ExprTk) trajectory of one obstacle, shared between the DynTraj
+ *  snapshots received for it.
+ *
+ *  Compiling is far more expensive than evaluating, and an obstacle sends the same expressions in
+ *  every message, so SANDO_NODE keeps one AnalyticExpr per obstacle id and reuses it while the
+ *  strings are unchanged. Immutable after compile() apart from the time variable, which eval()
+ *  sets under a lock: parallel planning threads evaluate the same obstacle concurrently.
+ *  A stationary obstacle (fixed position, zero velocity) needs no ExprTk at all.
+ */
+struct AnalyticExpr {
+  std::string x, y, z;     // position expressions in t
+  std::string vx, vy, vz;  // optional velocity expressions in t
+
+  /** @brief Build a stationary trajectory at p (no ExprTk). */
+  static std::shared_ptr<AnalyticExpr> makeConstant(const Eigen::Vector3d& p) {
+    auto a = std::make_shared<AnalyticExpr>();
+    a->constant_ = true;
+    a->const_pos_ = p;
+    return a;
+  }
+
+  /** @brief True when this was compiled from exactly these expression strings. */
+  bool sameSource(
+      const std::string& sx, const std::string& sy, const std::string& sz, const std::string& svx,
+      const std::string& svy, const std::string& svz) const {
+    return !constant_ && x == sx && y == sy && z == sz && vx == svx && vy == svy && vz == svz;
+  }
+
+  /** @brief Compile the expression strings (x/y/z required, velocities optional).
+   *  @return True if all present expressions compiled.
+   */
+  bool compile() {
+    symbol_table_.add_variable("t", t_var_);
+    symbol_table_.add_constants();
+    for (auto* e : {&ex_, &ey_, &ez_, &evx_, &evy_, &evz_}) e->register_symbol_table(symbol_table_);
+
+    exprtk::parser<double> parser;
+    auto compile_one = [&](const char* label, const std::string& src,
+                           exprtk::expression<double>& expr, bool required) -> bool {
+      if (src.empty()) {
+        if (required) std::cerr << "Missing required analytic expression " << label << "\n";
+        return !required;
+      }
+      if (!parser.compile(src, expr)) {
+        std::ostringstream oss;
+        oss << "ExprTk compile failure (" << label << "): '" << src << "' errors:";
+        for (std::size_t i = 0; i < parser.error_count(); ++i) {
+          auto e = parser.get_error(i);
+          oss << " [pos " << e.token.position << " type " << exprtk::parser_error::to_str(e.mode)
+              << " msg '" << e.diagnostic << "']";
+        }
+        std::cerr << oss.str() << std::endl;
+        return false;
+      }
+      return true;
+    };
+
+    bool ok = true;
+    ok &= compile_one("traj_x", x, ex_, true);
+    ok &= compile_one("traj_y", y, ey_, true);
+    ok &= compile_one("traj_z", z, ez_, true);
+    ok &= compile_one("traj_vx", vx, evx_, false);
+    ok &= compile_one("traj_vy", vy, evy_, false);
+    ok &= compile_one("traj_vz", vz, evz_, false);
+    has_vel_ = !vx.empty() && !vy.empty() && !vz.empty();
+    return ok;
+  }
+
+  /** @brief Position at time t. */
+  Eigen::Vector3d pos(double t) const {
+    if (constant_) return const_pos_;
+    std::lock_guard<std::mutex> lk(mtx_);
+    t_var_ = t;
+    return {ex_.value(), ey_.value(), ez_.value()};
+  }
+
+  /** @brief Velocity at time t (velocity expressions if given, else numerical difference). */
+  Eigen::Vector3d vel(double t) const {
+    if (constant_) return Eigen::Vector3d::Zero();
+    std::lock_guard<std::mutex> lk(mtx_);
+    t_var_ = t;
+    if (has_vel_) return {evx_.value(), evy_.value(), evz_.value()};
+    const double dt = 1e-3;
+    const Eigen::Vector3d p0(ex_.value(), ey_.value(), ez_.value());
+    t_var_ = t + dt;
+    const Eigen::Vector3d p1(ex_.value(), ey_.value(), ez_.value());
+    return (p1 - p0) / dt;
+  }
+
+  bool isConstant() const { return constant_; }
+
+ private:
+  bool constant_{false};
+  Eigen::Vector3d const_pos_{Eigen::Vector3d::Zero()};
+  bool has_vel_{false};
+  mutable std::mutex mtx_;
+  mutable double t_var_{0.0};
+  exprtk::symbol_table<double> symbol_table_;
+  exprtk::expression<double> ex_, ey_, ez_, evx_, evy_, evz_;
+};
+
 /** @brief Dynamic trajectory representation supporting both piecewise polynomial and analytic
  * (ExprTk) modes. */
 struct DynTraj {
@@ -753,10 +857,7 @@ struct DynTraj {
   // --- analytic expression branch ---
   std::string traj_x, traj_y, traj_z;
   std::string traj_vx, traj_vy, traj_vz;  // optional (velocity expressions)
-  double t_var{0.0};
-  exprtk::symbol_table<double> symbol_table;
-  exprtk::expression<double> expr_x, expr_y, expr_z;
-  exprtk::expression<double> expr_vx, expr_vy, expr_vz;
+  std::shared_ptr<const AnalyticExpr> analytic;  // compiled form, shared between snapshots
   bool analytic_compiled{false};
 
   // shared metadata
@@ -786,55 +887,27 @@ struct DynTraj {
    *  @return True if all required expressions compiled successfully.
    */
   bool compileAnalytic() {
-    symbol_table.clear();
-    symbol_table.add_variable("t", t_var);
-    symbol_table.add_constants();
-
-    auto reg = [&](exprtk::expression<double>& e) { e.register_symbol_table(symbol_table); };
-    reg(expr_x);
-    reg(expr_y);
-    reg(expr_z);
-    reg(expr_vx);
-    reg(expr_vy);
-    reg(expr_vz);
-
-    exprtk::parser<double> parser;
-
-    auto compile_one = [&](const std::string& label, const std::string& src,
-                           exprtk::expression<double>& expr) -> bool {
-      if (src.empty()) {
-        if (label == "traj_x" || label == "traj_y" || label == "traj_z") {
-          std::cerr << "Missing required analytic expression " << label << "\n";
-          return false;
-        }
-        // otherwise it was a velocity string → OK to skip
-        return true;
-      }
-
-      if (!parser.compile(src, expr)) {
-        std::ostringstream oss;
-        oss << "ExprTk compile failure (" << label << "): '" << src << "' errors:";
-        for (std::size_t i = 0; i < parser.error_count(); ++i) {
-          auto e = parser.get_error(i);
-          oss << " [pos " << e.token.position << " type " << exprtk::parser_error::to_str(e.mode)
-              << " msg '" << e.diagnostic << "']";
-        }
-        std::cerr << oss.str() << std::endl;
-        return false;
-      }
-      return true;
-    };
-
-    bool ok = true;
-    ok &= compile_one("traj_x", traj_x, expr_x);
-    ok &= compile_one("traj_y", traj_y, expr_y);
-    ok &= compile_one("traj_z", traj_z, expr_z);
-    ok &= compile_one("traj_vx", traj_vx, expr_vx);
-    ok &= compile_one("traj_vy", traj_vy, expr_vy);
-    ok &= compile_one("traj_vz", traj_vz, expr_vz);
-
+    auto a = std::make_shared<AnalyticExpr>();
+    a->x = traj_x;
+    a->y = traj_y;
+    a->z = traj_z;
+    a->vx = traj_vx;
+    a->vy = traj_vy;
+    a->vz = traj_vz;
+    const bool ok = a->compile();
+    if (ok) analytic = std::move(a);
     analytic_compiled = ok;
     return ok;
+  }
+
+  /** @brief Use an already-compiled (or constant) analytic trajectory.
+   *  @return True if a was usable.
+   */
+  bool setAnalytic(std::shared_ptr<const AnalyticExpr> a) {
+    analytic = std::move(a);
+    analytic_compiled = static_cast<bool>(analytic);
+    if (analytic_compiled) mode = Mode::Analytic;
+    return analytic_compiled;
   }
 
   /** @brief Evaluate position at time t.
@@ -904,8 +977,7 @@ struct DynTraj {
       return Eigen::Vector3d::Zero();
     }
 
-    const_cast<DynTraj*>(this)->t_var = t;
-    return {expr_x.value(), expr_y.value(), expr_z.value()};
+    return analytic->pos(t);
   }
 
   /** @brief Evaluate velocity at time t.
@@ -929,18 +1001,7 @@ struct DynTraj {
    */
   inline Eigen::Vector3d velocityAnalytic(double t) const {
     if (!analytic_compiled) return Eigen::Vector3d::Zero();
-    const_cast<DynTraj*>(this)->t_var = t;
-    // If velocity expressions provided
-    if (!traj_vx.empty() && !traj_vy.empty() && !traj_vz.empty())
-      return {expr_vx.value(), expr_vy.value(), expr_vz.value()};
-
-    // Fallback numerical diff (dt small):
-    double dt = 1e-3;
-    const_cast<DynTraj*>(this)->t_var = t;
-    double x0 = expr_x.value(), y0 = expr_y.value(), z0 = expr_z.value();
-    const_cast<DynTraj*>(this)->t_var = t + dt;
-    double x1 = expr_x.value(), y1 = expr_y.value(), z1 = expr_z.value();
-    return {(x1 - x0) / dt, (y1 - y0) / dt, (z1 - z0) / dt};
+    return analytic->vel(t);
   }
 
   /** @brief Evaluate acceleration at time t.

@@ -8,6 +8,8 @@
 
 #include "sando/sando.hpp"
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <unordered_set>
 #include <fstream>
 
@@ -985,6 +987,9 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
   sub_goal.push_back(local_G.pos[1]);
   sub_goal.push_back(local_G.pos[2]);
 
+  // Unknown space boundary of base_map: the same for every decomposition of this replan
+  const auto unknown_boundary = hgp_manager_.extractUnknownBoundary(base_map);
+
   // Pre-compute convex decomposition if environment is static or dynamic_worst_case
   std::vector<LinearConstraint3D> shared_spatial_constraints;
   vec_E<Polyhedron<3>> shared_spatial_poly_out;
@@ -1012,7 +1017,7 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
     // Run spatial convex decomposition once before threading
     if (!hgp_manager_.cvxEllipsoidDecomp(
             ellip_workers_[0], global_path, base_map, obst_pos, obst_bbox, seg_end_times,
-            shared_spatial_constraints, shared_spatial_poly_out)) {
+            shared_spatial_constraints, shared_spatial_poly_out, unknown_boundary)) {
       std::cout << bold << red
                 << "Precomputed spatial convex decomposition failed for static environment" << reset
                 << std::endl;
@@ -1023,61 +1028,107 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
     poly_out_whole_ = shared_spatial_poly_out;
   }
 
-  // Shared flag: when one thread succeeds, all others abort early
+  // Shared flag: when one attempt succeeds, the others abort at their next check
   auto any_thread_succeeded = std::make_shared<std::atomic<bool>>(false);
 
-  std::vector<std::future<std::tuple<bool, double, double, double, vec_E<Polyhedron<3>>>>> futures;
-  futures.reserve(factors_.size());
+  using AttemptResult = std::tuple<bool, double, double, double, vec_E<Polyhedron<3>>>;
+  const size_t num_factors = factors_.size();
+
+  // Completion record of this replan's attempts: the pool threads report into it and this thread
+  // sleeps on the condition variable until the next attempt finishes (no polling)
+  struct Round {
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::vector<AttemptResult> results;
+    std::deque<size_t> finished;  // attempt indices in completion order, not yet handled
+    size_t num_done = 0;
+  };
+  auto round = std::make_shared<Round>();
+  round->results.resize(num_factors);
+
+  // Persistent threads, one per attempt up to the number of physical cores: attempts sharing a
+  // core through hyperthreading slow each other down more than queueing the extra ones does
+  // (6-core i7, medium dynamic demos: replans 14 vs 15.4 ms for the drone, 11.6-14.7 vs
+  // 15.9-22.6 ms for the rover with 6 threads instead of 9)
+  if (!attempt_pool_) {
+    attempt_pool_ = std::make_unique<sando::WorkerPool>(
+        std::min<size_t>(sando::physicalCoreCount(), std::max<size_t>(num_factors, 1)));
+    std::cout << "Trajectory attempts: " << num_factors << " per replan on "
+              << attempt_pool_->size() << " threads" << std::endl;
+  }
+
+  // Start order: from the middle of the factor window (around the last successful factor)
+  // outward, so when there are more attempts than threads the likeliest start first
+  std::vector<size_t> order;
+  order.reserve(num_factors);
+  for (size_t k = 0; k < num_factors; ++k) {
+    const size_t mid = num_factors / 2;
+    const size_t off = (k + 1) / 2;
+    const size_t idx = (k % 2 == 1) ? mid - off : mid + off;
+    if (idx < num_factors) order.push_back(idx);
+  }
+  for (size_t idx = 0; idx < num_factors; ++idx)  // indices the alternation ran past
+    if (std::find(order.begin(), order.end(), idx) == order.end()) order.push_back(idx);
 
   // Time the parallel optimization section
   auto parallel_opt_start = std::chrono::steady_clock::now();
 
-  for (size_t i = 0; i < factors_.size(); ++i) {
+  for (const size_t i : order) {
     const double factor = factors_[i];  // corresponding factor for solver i
 
-    futures.push_back(std::async(
-        std::launch::async,
-        [this, i, factor, &global_path, local_A, local_E, sub_goal, A_time, initial_dt, &obst_pos,
-         &obst_bbox, &base_map, use_precomputed_constraints, &shared_spatial_constraints,
-         &shared_spatial_poly_out,
-         any_thread_succeeded]() -> std::tuple<bool, double, double, double, vec_E<Polyhedron<3>>> {
-          try {
-            // Early exit: another thread already found a solution
-            if (any_thread_succeeded->load(std::memory_order_relaxed))
-              return {false, 0.0, 0.0, factor, vec_E<Polyhedron<3>>{}};
+    // The attempts reference this stack frame (paths, maps, obstacles): every submitted attempt
+    // is waited for below before returning
+    attempt_pool_->submit([this, i, factor, &global_path, local_A, local_E, sub_goal, A_time,
+                           initial_dt, &obst_pos, &obst_bbox, &base_map, &unknown_boundary,
+                           use_precomputed_constraints, &shared_spatial_constraints,
+                           &shared_spatial_poly_out, any_thread_succeeded, round]() {
+      AttemptResult res{false, 0.0, 0.0, factor, vec_E<Polyhedron<3>>{}};
+      try {
+        // Skip when another attempt already found a solution
+        if (!any_thread_succeeded->load(std::memory_order_relaxed)) {
+          double thread_gurobi_time = 0.0;
+          double thread_convx_decomp_time = 0.0;
+          vec_E<Polyhedron<3>> thread_poly_out_safe;
 
-            double thread_gurobi_time = 0.0;
-            double thread_convx_decomp_time = 0.0;
-            vec_E<Polyhedron<3>> thread_poly_out_safe;
+          // Per-worker decomp util (no sharing across worker index)
+          EllipsoidDecomp3D& ellip = this->ellip_workers_[i];
 
-            // Per-worker decomp util (no sharing across worker index)
-            EllipsoidDecomp3D& ellip = this->ellip_workers_[i];
+          const bool result = generateLocalTrajectory(
+              ellip, global_path, local_A, local_E, sub_goal, A_time, thread_gurobi_time,
+              thread_convx_decomp_time, whole_traj_solver_ptrs_[i], factor, initial_dt, obst_pos,
+              obst_bbox,
+              base_map,  // base_uo snapshot
+              thread_poly_out_safe,
+              use_precomputed_constraints ? &shared_spatial_constraints : nullptr,
+              use_precomputed_constraints ? &shared_spatial_poly_out : nullptr, unknown_boundary,
+              any_thread_succeeded.get());
 
-            const bool result = generateLocalTrajectory(
-                ellip, global_path, local_A, local_E, sub_goal, A_time, thread_gurobi_time,
-                thread_convx_decomp_time, whole_traj_solver_ptrs_[i], factor, initial_dt, obst_pos,
-                obst_bbox,
-                base_map,  // base_uo snapshot
-                thread_poly_out_safe,
-                use_precomputed_constraints ? &shared_spatial_constraints : nullptr,
-                use_precomputed_constraints ? &shared_spatial_poly_out : nullptr);
+          // Signal other attempts to stop
+          if (result) any_thread_succeeded->store(true, std::memory_order_relaxed);
 
-            // Signal other threads to stop
-            if (result) any_thread_succeeded->store(true, std::memory_order_relaxed);
+          res = AttemptResult{
+              result, thread_gurobi_time, thread_convx_decomp_time, factor,
+              std::move(thread_poly_out_safe)};
+        }
+      } catch (const std::exception& ex) {
+        std::cerr << "Exception in trajectory attempt with factor " << factor << ": " << ex.what()
+                  << std::endl;
+      } catch (...) {
+        std::cerr << "Unknown exception in trajectory attempt with factor " << factor
+                  << std::endl;
+      }
 
-            return {
-                result, thread_gurobi_time, thread_convx_decomp_time, factor, thread_poly_out_safe};
-          } catch (const std::exception& ex) {
-            std::cerr << "Exception in async task with factor " << factor << ": " << ex.what()
-                      << std::endl;
-            return {false, 0.0, 0.0, factor, vec_E<Polyhedron<3>>{}};
-          }
-        }));
+      {
+        std::lock_guard<std::mutex> lk(round->mtx);
+        round->results[i] = std::move(res);
+        round->finished.push_back(i);
+        ++round->num_done;
+      }
+      round->cv.notify_one();
+    });
   }
 
-  // Poll futures for first success instead of blocking sequentially.
-  // This ensures we react immediately when ANY thread finishes successfully,
-  // rather than waiting for earlier (by index) threads to complete first.
+  // Handle the attempts as they finish: the first success stops the others
   std::vector<bool> vec_optimization_succeeded;
   std::vector<std::vector<RobotState>> vec_goal_setpoints;
   std::vector<PieceWisePol> vec_pwp_to_share;
@@ -1086,7 +1137,6 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
   std::vector<double> vec_convx_decomp_times;
   std::vector<vec_E<Polyhedron<3>>> vec_poly_out_safe;
 
-  const size_t num_factors = factors_.size();
   vec_optimization_succeeded.resize(num_factors, false);
   vec_goal_setpoints.resize(num_factors);
   vec_pwp_to_share.resize(num_factors);
@@ -1095,71 +1145,58 @@ bool SANDO::planLocalTrajectory(vec_Vecf<3>& global_path, double last_replaning_
   vec_convx_decomp_times.resize(num_factors, 0.0);
   vec_poly_out_safe.resize(num_factors);
 
-  std::vector<bool> collected(num_factors, false);
-  size_t num_collected = 0;
   int winner_index = -1;
+  size_t num_handled = 0;
 
-  // Poll until we find a winner or all futures are collected
-  while (num_collected < num_factors) {
-    for (size_t i = 0; i < num_factors; ++i) {
-      if (collected[i]) continue;
+  while (num_handled < num_factors && winner_index < 0) {
+    size_t i;
+    {
+      std::unique_lock<std::mutex> lk(round->mtx);
+      round->cv.wait(lk, [&] { return !round->finished.empty(); });
+      i = round->finished.front();
+      round->finished.pop_front();
+    }
+    ++num_handled;
 
-      // Non-blocking check: is this future ready?
-      if (futures[i].wait_for(std::chrono::microseconds(0)) != std::future_status::ready) continue;
+    auto& [result, thread_gurobi_time, thread_convx_decomp_time, thread_factor,
+           thread_poly_out_safe] = round->results[i];
 
-      // Collect the result
-      auto
-          [result, thread_gurobi_time, thread_convx_decomp_time, thread_factor,
-           thread_poly_out_safe] = futures[i].get();
-      collected[i] = true;
-      num_collected++;
+    // Save polytopes for visualization even if the optimizer failed
+    if (poly_out_safe_.empty() && !thread_poly_out_safe.empty())
+      poly_out_safe_ = thread_poly_out_safe;
 
-      // Save polytopes for visualization even if the optimizer failed
-      if (poly_out_safe_.empty() && !thread_poly_out_safe.empty())
-        poly_out_safe_ = thread_poly_out_safe;
+    if (!result) continue;
 
-      if (!result) continue;
-
-      // First success — immediately stop all other solvers
-      for (size_t j = 0; j < num_factors; ++j) {
-        if (j == i) continue;
-        try {
-          whole_traj_solver_ptrs_[j]->stopExecution();
-        } catch (const std::exception& e) {
-          std::cout << "it's likely that the solver has gurobi error and already released the "
-                       "gurobi environment"
-                    << std::endl;
-          std::cerr << e.what() << '\n';
-        }
+    // First success: stop all other solvers
+    for (size_t j = 0; j < num_factors; ++j) {
+      if (j == i) continue;
+      try {
+        whole_traj_solver_ptrs_[j]->stopExecution();
+      } catch (const std::exception& e) {
+        std::cout << "it's likely that the solver has gurobi error and already released the "
+                     "gurobi environment"
+                  << std::endl;
+        std::cerr << e.what() << '\n';
       }
-
-      // Get results from the successful solver
-      whole_traj_solver_ptrs_[i]->fillGoalSetPoints();
-      whole_traj_solver_ptrs_[i]->getGoalSetpoints(vec_goal_setpoints[i]);
-      whole_traj_solver_ptrs_[i]->getPieceWisePol(vec_pwp_to_share[i]);
-      whole_traj_solver_ptrs_[i]->getControlPoints(vec_cps[i]);  // Bezier control points
-      vec_gurobi_times[i] = thread_gurobi_time;
-      vec_convx_decomp_times[i] = thread_convx_decomp_time;
-      vec_poly_out_safe[i] = thread_poly_out_safe;
-      vec_optimization_succeeded[i] = true;
-      winner_index = static_cast<int>(i);
     }
 
-    // If we found a winner, still drain remaining futures (they should exit fast
-    // due to stopExecution + any_thread_succeeded flag)
-    if (winner_index >= 0 && num_collected < num_factors) {
-      for (size_t i = 0; i < num_factors; ++i) {
-        if (!collected[i]) {
-          futures[i].get();  // These should return quickly since solvers were stopped
-          collected[i] = true;
-          num_collected++;
-        }
-      }
-      break;
-    }
+    // Get results from the successful solver
+    whole_traj_solver_ptrs_[i]->fillGoalSetPoints();
+    whole_traj_solver_ptrs_[i]->getGoalSetpoints(vec_goal_setpoints[i]);
+    whole_traj_solver_ptrs_[i]->getPieceWisePol(vec_pwp_to_share[i]);
+    whole_traj_solver_ptrs_[i]->getControlPoints(vec_cps[i]);  // Bezier control points
+    vec_gurobi_times[i] = thread_gurobi_time;
+    vec_convx_decomp_times[i] = thread_convx_decomp_time;
+    vec_poly_out_safe[i] = thread_poly_out_safe;
+    vec_optimization_succeeded[i] = true;
+    winner_index = static_cast<int>(i);
+  }
 
-    // Brief yield to avoid busy-spin
-    std::this_thread::yield();
+  // Wait for the attempts still running (they stop at their next check) before their solvers and
+  // this frame's data are reused
+  {
+    std::unique_lock<std::mutex> lk(round->mtx);
+    round->cv.wait(lk, [&] { return round->num_done == num_factors; });
   }
 
   // Measure wall-clock time for the parallel optimization only
@@ -1334,7 +1371,9 @@ bool SANDO::generateLocalTrajectory(
     const vec_Vec3f& base_uo,
     vec_E<Polyhedron<3>>& poly_out_safe,
     const std::vector<LinearConstraint3D>* precomputed_spatial_constraints,
-    const vec_E<Polyhedron<3>>* precomputed_spatial_poly_out) {
+    const vec_E<Polyhedron<3>>* precomputed_spatial_poly_out,
+    std::shared_ptr<const HGPManager::UnknownBoundary> unknown_boundary,
+    const std::atomic<bool>* cancel) {
   // P: spatial corridor pieces (global segments)
   const size_t P = (global_path.size() >= 2) ? (global_path.size() - 1) : 0;
   if (P == 0) return false;
@@ -1371,7 +1410,7 @@ bool SANDO::generateLocalTrajectory(
     // Dynamic environment: compute time-layered constraints for this thread
     if (!hgp_manager_.cvxEllipsoidDecompTimeLayered(
             ellip, global_path, base_uo, obst_pos, obst_bbox, time_end_times, l_constraints_by_time,
-            poly_out_by_time)) {
+            poly_out_by_time, unknown_boundary, cancel)) {
       poly_out_safe.clear();
       return false;
     }
@@ -1387,6 +1426,9 @@ bool SANDO::generateLocalTrajectory(
       }
     }
   }
+
+  // Another attempt already succeeded during the decomposition
+  if (cancel && cancel->load(std::memory_order_relaxed)) return false;
 
   // Initialize the solver.
   whole_traj_solver_ptr->setX0(local_A);  // Initial condition
