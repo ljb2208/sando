@@ -326,10 +326,6 @@ grep -qxF "source $DECOMP_WS/install/setup.bash" ~/.bashrc || \
 grep -qxF "source $SANDO_WS/install/setup.bash" ~/.bashrc || \
     echo "source $SANDO_WS/install/setup.bash" >> ~/.bashrc
 
-# Add ROS domain ID
-grep -qxF 'export ROS_DOMAIN_ID=20' ~/.bashrc || \
-    echo 'export ROS_DOMAIN_ID=20' >> ~/.bashrc
-
 # ============================================================
 # Summary
 # ============================================================

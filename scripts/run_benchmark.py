@@ -769,9 +769,6 @@ def run_single_trial(
     print(f"  j_max: {j_max_actual} m/s³")
     print(f"  drone_bbox: {sando_params['drone_bbox']} (half-extents)\n")
 
-    # Set ROS_DOMAIN_ID to match the simulation (run_sim.py uses 7)
-    os.environ["ROS_DOMAIN_ID"] = "20"
-
     # Initialize ROS2 (check if already initialized to avoid errors)
     try:
         if not rclpy.ok():
@@ -968,9 +965,7 @@ def run_single_trial(
         bag_cmd = ["ros2", "bag", "record", "-o", bag_path] + record_topics
         print(f"  Starting rosbag recording: {bag_name}")
 
-        # Set ROS_DOMAIN_ID for bag recording
         bag_env = os.environ.copy()
-        bag_env["ROS_DOMAIN_ID"] = "20"
 
         bag_process = subprocess.Popen(
             bag_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=bag_env

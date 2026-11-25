@@ -46,6 +46,7 @@ import tempfile
 import time
 import yaml
 from pathlib import Path
+from typing import Optional
 
 
 # Source rviz config (not the install copy)
@@ -92,7 +93,7 @@ def find_setup_bash(args_setup_bash: str = None) -> Path:
     sys.exit(1)
 
 
-def workspace_source_commands(ros_domain_id: int) -> list:
+def workspace_source_commands(ros_domain_id: Optional[int] = None) -> list:
     """Generate shell commands to cleanly source the SANDO workspace in tmux panes.
 
     Clears stale ROS/colcon environment from .bashrc before sourcing the target
@@ -110,14 +111,17 @@ def workspace_source_commands(ros_domain_id: int) -> list:
         'export "$1=$o"; }; '
         f'for _v in {path_vars}; do _sando_strip $_v; done; unset -f _sando_strip; unset _v'
     )
-    return [
+    cmds = [
         # Reset ROS overlay so only the target workspace is active
         'unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH AMENT_CURRENT_PREFIX CONDA_PREFIX 2>/dev/null',
         strip_ros_paths,
         f"source /opt/ros/{ROS_DISTRO}/setup.bash",
         '. "$SETUP_BASH"',
-        f"export ROS_DOMAIN_ID={ros_domain_id}",
     ]
+    # Only override ROS_DOMAIN_ID when explicitly requested; otherwise inherit the default
+    if ros_domain_id is not None:
+        cmds.append(f"export ROS_DOMAIN_ID={ros_domain_id}")
+    return cmds
 
 
 def generate_multiagent_positions(
@@ -147,7 +151,7 @@ def generate_multiagent_positions(
 
 
 def generate_multiagent_yaml(
-    setup_bash: Path, agents: list, ros_domain_id: int = 20
+    setup_bash: Path, agents: list, ros_domain_id: Optional[int] = None
 ) -> str:
     """Generate YAML for multi-agent fake simulation."""
     panes = []
@@ -193,7 +197,7 @@ def generate_rviz_only_yaml(
     goal: tuple,
     start_pos: tuple = (0, 0, 3.0),
     start_yaw: float = 0.0,
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     num_obstacles: int = 50,
     dynamic_ratio: float = 0.65,
     x_min: float = 5.0,
@@ -448,7 +452,7 @@ def generate_gazebo_dynamic_yaml(
     env: str = "easy_forest",
     start_pos: tuple = (0, 0, 3.0),
     start_yaw: float = 0.0,
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     use_rviz: bool = True,
     use_gazebo_gui: bool = False,
     num_dyn_obstacles: int = 10,
@@ -644,7 +648,7 @@ def generate_gazebo_dynamic_yaml(
 def generate_hover_test_yaml(
     setup_bash: Path,
     start_pos: tuple = (0, 0, 2.0),
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     use_rviz: bool = True,
     obs_offset: float = 5.0,
     obs_scale: float = 4.0,
@@ -777,7 +781,7 @@ def generate_adversarial_test_yaml(
     chaser_start: tuple = (8, 0, 2.0),
     evader_v_max: float = 5.0,
     chaser_v_max: float = 1.0,
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     use_rviz: bool = True,
 ) -> str:
     """Generate YAML for adversarial hover-avoidance test.
@@ -881,7 +885,7 @@ def generate_gazebo_yaml(
     env: str = "hard_forest",
     start_pos: tuple = (0, 0, 3.0),
     start_yaw: float = 0.0,
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     use_rviz: bool = True,
     use_gazebo_gui: bool = True,
     use_dyn_obs: bool = False,
@@ -1152,7 +1156,7 @@ def wait_for_goal_reached(namespace: str, timeout: float) -> bool:
 
 def run_benchmark_record(
     setup_bash: Path,
-    ros_domain_id: int = 20,
+    ros_domain_id: Optional[int] = None,
     timeout: float = 60.0,
     use_rviz: bool = True,
     cases: set = None,
@@ -1191,7 +1195,8 @@ def run_benchmark_record(
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Benchmark bags will be saved to: {output_dir}")
 
-    os.environ["ROS_DOMAIN_ID"] = str(ros_domain_id)
+    if ros_domain_id is not None:
+        os.environ["ROS_DOMAIN_ID"] = str(ros_domain_id)
     rclpy.init()
 
     # Persistent node — stays alive across all configs so DDS discovery
@@ -1315,7 +1320,8 @@ def run_benchmark_record(
         bag_path = str(bag_dir / "recording")
 
         bag_env = os.environ.copy()
-        bag_env["ROS_DOMAIN_ID"] = str(ros_domain_id)
+        if ros_domain_id is not None:
+            bag_env["ROS_DOMAIN_ID"] = str(ros_domain_id)
 
         record_topics = list(RVIZ_RECORD_TOPICS)
         if mode == "gazebo":
@@ -1510,7 +1516,8 @@ def main():
     )
 
     parser.add_argument(
-        "--ros-domain-id", type=int, default=20, help="ROS_DOMAIN_ID (default: 20)"
+        "--ros-domain-id", type=int, default=None,
+        help="Override ROS_DOMAIN_ID (default: inherit from environment)"
     )
 
     parser.add_argument(

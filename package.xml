@@ -32,6 +32,8 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <exec_depend>geographic_msgs</exec_depend>  <!-- waypoint_follower.py -->
+  <exec_depend>nav_msgs</exec_depend>
   <depend>decomp_rviz_plugins</depend>
   <depend>decomp_test_node</depend>
   <depend>std_srvs</depend>

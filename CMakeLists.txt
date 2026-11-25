@@ -335,6 +335,7 @@ install(PROGRAMS
   scripts/goal_sender.py
   scripts/sando_web.py
   scripts/goal_relay.py
+  scripts/waypoint_follower.py
   scripts/goal_monitor_node.py
   scripts/generate_random_forest.py
   scripts/rviz_obstacles_node.py

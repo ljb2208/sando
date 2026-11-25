@@ -2,8 +2,6 @@ session_name: generate_sfc
 windows:
   - window_name: main
     layout: tiled
-    shell_command_before:
-      - export ROS_DOMAIN_ID=20
 
     panes:
       # fixed obstacles publisher

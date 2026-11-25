@@ -78,6 +78,21 @@ def generate_launch_description():
     web_port_arg = DeclareLaunchArgument(
         "web_port", default_value="8080", description="Port of the web interface"
     )
+    waypoints_arg = DeclareLaunchArgument(
+        "waypoints",
+        default_value="false",
+        description="Start waypoint_follower: follow the GPS waypoints (geographic_msgs/GeoPath on "
+        "/waypoints, e.g. from the AutoRally web OCS), converted with the ENU origin on "
+        "/local_origin, one term_goal at a time",
+    )
+    state_odom_topic_arg = DeclareLaunchArgument(
+        "state_odom_topic",
+        default_value="",
+        description="Take the vehicle state from this nav_msgs/Odometry topic (e.g. /pose from the "
+        "AutoRally state estimator) through convert_odom_to_state, and start no simulator. "
+        "sim_env then defaults to rviz_only: an empty map, so SANDO plans in free space unless a "
+        "map source is added",
+    )
     use_benchmark_arg = DeclareLaunchArgument(
         "use_benchmark",
         default_value="false",
@@ -157,6 +172,7 @@ def generate_launch_description():
         if vehicle not in ("uav", "ackermann"):
             raise RuntimeError(f"vehicle:={vehicle}: use uav or ackermann")
         web_port = int(LaunchConfiguration("web_port").perform(context))
+        waypoints = convert_str_to_bool(LaunchConfiguration("waypoints").perform(context))
         use_benchmark = convert_str_to_bool(
             LaunchConfiguration("use_benchmark").perform(context)
         )
@@ -167,6 +183,7 @@ def generate_launch_description():
             LaunchConfiguration("use_onboard_localization").perform(context)
         )
         sim_env_override = LaunchConfiguration("sim_env").perform(context)
+        state_odom_topic = LaunchConfiguration("state_odom_topic").perform(context)
         environment_assumption_override = LaunchConfiguration(
             "environment_assumption"
         ).perform(context)
@@ -230,6 +247,9 @@ def generate_launch_description():
         # Override sim_env if provided (hardware configs may not have sim_env)
         if sim_env_override:
             parameters["sim_env"] = sim_env_override
+        elif state_odom_topic:
+            # Real vehicle state, no simulator: rviz_only starts SANDO with an empty map
+            parameters["sim_env"] = "rviz_only"
         elif "sim_env" not in parameters:
             parameters["sim_env"] = ""
 
@@ -511,7 +531,20 @@ def generate_launch_description():
 
         # Return launch description
         nodes_to_start = [sando_node]
-        if use_hardware and use_onboard_localization:
+        if state_odom_topic:
+            # External odometry (e.g. the AutoRally state estimator's /pose: world-frame twist)
+            nodes_to_start.append(
+                Node(
+                    package="sando",
+                    executable="convert_odom_to_state",
+                    name="odom_to_state",
+                    namespace=namespace,
+                    output="screen",
+                    parameters=[{"twist_in_body_frame": False}],
+                    remappings=[("odom", state_odom_topic)],
+                )
+            )
+        elif use_hardware and use_onboard_localization:
             nodes_to_start.append(odom_to_global_state_node)
         elif use_hardware:
             nodes_to_start.append(pose_twist_to_state_node)
@@ -582,6 +615,23 @@ def generate_launch_description():
                 )
             )
 
+        if waypoints:
+            nodes_to_start.append(
+                Node(
+                    package="sando",
+                    executable="waypoint_follower.py",
+                    name="waypoint_follower",
+                    namespace=namespace,
+                    output="screen",
+                    parameters=[
+                        {
+                            "default_goal_z": float(parameters.get("default_goal_z", 3.0)),
+                            "goal_radius": float(parameters.get("goal_radius", 0.5)),
+                        }
+                    ],
+                )
+            )
+
         return nodes_to_start
 
     # Create launch description
@@ -599,6 +649,8 @@ def generate_launch_description():
             vehicle_arg,
             web_arg,
             web_port_arg,
+            waypoints_arg,
+            state_odom_topic_arg,
             use_benchmark_arg,
             use_hardware_arg,
             use_onboard_localization_arg,
