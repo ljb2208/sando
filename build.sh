@@ -130,7 +130,7 @@ for d in "$SCRIPT_DIR"/deps/*/; do
     d="${d%/}"
     name=$(basename "$d")
     # Skip deps built in separate workspaces or with plain cmake
-    case "$name" in Livox-SDK2|livox_ros_driver2|DecompROS2) continue;; esac
+    case "$name" in DecompROS2) continue;; esac
     # Gazebo Classic is only available up to Humble: keep just gazebo_msgs and skip the
     # Gazebo Classic simulation packages
     if [ "$ROS_DISTRO_ARG" != "humble" ]; then

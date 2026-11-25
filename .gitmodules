@@ -25,11 +25,3 @@
 [submodule "deps/unitree-go2-ros2"]
 	path = deps/unitree-go2-ros2
 	url = https://github.com/kotakondo/unitree-go2-ros2.git
-[submodule "deps/livox_ros_driver2"]
-	path = deps/livox_ros_driver2
-	url = https://github.com/kotakondo/livox_ros_driver2.git
-	ignore = dirty
-[submodule "deps/Livox-SDK2"]
-	path = deps/Livox-SDK2
-	url = https://github.com/Livox-SDK/Livox-SDK2.git
-	ignore = dirty

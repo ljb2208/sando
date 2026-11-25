@@ -192,7 +192,7 @@ WS_SRC="$SANDO_WS/src"
 for d in "$SCRIPT_DIR"/deps/*/; do
     name=$(basename "$d")
     # Skip deps built in separate workspaces
-    case "$name" in Livox-SDK2|livox_ros_driver2|DecompROS2) continue;; esac
+    case "$name" in DecompROS2) continue;; esac
     # Gazebo Classic is only available up to Humble: keep just gazebo_msgs and skip the
     # Gazebo Classic simulation packages
     if [ "$ROS_DISTRO" != "humble" ]; then
@@ -242,38 +242,52 @@ else
 fi
 
 # ============================================================
-# 9. Build Livox-SDK2 (cmake, not colcon)
+# 9. Build Livox-SDK2 (cmake, not colcon), cloned from GitHub
 # ============================================================
 echo ""
 echo "============================================="
 echo "STEP 9: Building Livox-SDK2"
 echo "============================================="
-LIVOX_SDK="$SCRIPT_DIR/deps/Livox-SDK2"
-if [ -d "$LIVOX_SDK" ] && [ ! -f "/usr/local/lib/liblivox_lidar_sdk_static.a" ]; then
+# The latest code (head of the default branch) of the SDK and the driver: the latest driver needs
+# SDK code newer than the last SDK release (a release pair that builds: SDK v1.3.1, driver 1.2.6)
+LIVOX_SDK="$CODE_DIR/Livox-SDK2"
+if [ ! -f "/usr/local/lib/liblivox_lidar_sdk_static.a" ]; then
     echo "Installing Livox-SDK2..."
-    mkdir -p "$LIVOX_SDK/build"
-    cd "$LIVOX_SDK/build"
-    cmake .. && make -j"$NUM_JOBS" && sudo make install
+    [ -d "$LIVOX_SDK/.git" ] || git clone https://github.com/Livox-SDK/Livox-SDK2.git "$LIVOX_SDK"
+    # -include cstdint: the SDK releases up to v1.3.1 miss it for GCC 13 (harmless otherwise)
+    cmake -S "$LIVOX_SDK" -B "$LIVOX_SDK/build" -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_FLAGS="-include cstdint"
+    cmake --build "$LIVOX_SDK/build" -j "$NUM_JOBS"
+    sudo cmake --install "$LIVOX_SDK/build"
+    sudo ldconfig
 else
     echo "Livox-SDK2 already installed, skipping..."
 fi
 
 # ============================================================
-# 10. Build livox_ros_driver2 (needs its own workspace due to custom build.sh)
+# 10. Build livox_ros_driver2 (own workspace), cloned from GitHub
 # ============================================================
 echo ""
 echo "============================================="
 echo "STEP 10: Building livox_ros_driver2"
 echo "============================================="
-LIVOX_DRIVER="$SCRIPT_DIR/deps/livox_ros_driver2"
 LIVOX_WS="$CODE_DIR/livox_ws"
-if [ -d "$LIVOX_DRIVER" ] && [ ! -d "$LIVOX_WS/install/livox_ros_driver2" ]; then
+LIVOX_DRIVER="$LIVOX_WS/src/livox_ros_driver2"
+if [ ! -d "$LIVOX_WS/install/livox_ros_driver2" ]; then
     echo "Building livox_ros_driver2..."
     mkdir -p "$LIVOX_WS/src"
-    ln -sf "$LIVOX_DRIVER" "$LIVOX_WS/src/livox_ros_driver2"
-    cd "$LIVOX_WS/src/livox_ros_driver2"
+    # An older setup.sh linked this path to the (since removed) deps/livox_ros_driver2 submodule
+    [ -L "$LIVOX_DRIVER" ] && rm "$LIVOX_DRIVER"
+    [ -d "$LIVOX_DRIVER/.git" ] || git clone https://github.com/Livox-SDK/livox_ros_driver2.git "$LIVOX_DRIVER"
+    # The driver's build.sh steps, without its deletion of the workspace's build/ and install/
+    cp -f "$LIVOX_DRIVER/package_ROS2.xml" "$LIVOX_DRIVER/package.xml"
+    # IMU messages in the configured frame_id, like the point clouds (upstream: "livox_frame")
+    sed -i 's|imu_msg.header.frame_id = "livox_frame";|imu_msg.header.frame_id.assign(frame_id_);|' \
+        "$LIVOX_DRIVER/src/lddc.cpp"
+    cd "$LIVOX_WS"
     source /opt/ros/humble/setup.bash
-    ./build.sh humble
+    colcon build --parallel-workers "$NUM_JOBS" \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DROS_EDITION=ROS2 -DDISTRO_ROS=humble
 else
     echo "livox_ros_driver2 already built, skipping..."
 fi

@@ -88,31 +88,38 @@ RUN DUMMY=${DUMMY} git clone --branch ${SANDO_TAG} --depth 1 ${SANDO_REPO} sando
     cd sando && \
     git submodule update --init --recursive
 
-# Symlink deps for colcon package discovery (skip Livox-SDK2 and livox_ros_driver2 — built separately)
+# Symlink deps for colcon package discovery
 WORKDIR ${SANDO_WS}/src
 RUN for d in sando/deps/*/; do \
       name=$(basename "$d"); \
-      case "$name" in Livox-SDK2|livox_ros_driver2) continue;; esac; \
       [ ! -e "$name" ] && ln -s "$d" "$name"; \
     done
 
-# Build Livox-SDK2 (cmake install to /usr/local)
-WORKDIR ${SANDO_WS}/src/sando/deps/Livox-SDK2
-RUN mkdir -p build && cd build && cmake .. && make -j && make install
+# Livox SDK and ROS 2 driver from GitHub (latest code of both: the latest driver needs SDK code
+# newer than the last SDK release; a release pair that builds: SDK v1.3.1, driver 1.2.6)
+ARG LIVOX_SDK_REF=master
+ARG LIVOX_DRIVER_REF=master
 
-# Build livox_ros_driver2 (in its own workspace — requires build.sh for package file setup)
+# Build Livox-SDK2 (cmake install to /usr/local)
+WORKDIR /opt
+RUN git clone https://github.com/Livox-SDK/Livox-SDK2.git && \
+    cd Livox-SDK2 && git checkout ${LIVOX_SDK_REF} && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-include cstdint" && \
+    cmake --build build -j && cmake --install build && ldconfig
+
+# Build livox_ros_driver2 (in its own workspace; package.xml as its build.sh sets it up, IMU messages
+# in the configured frame_id like the point clouds)
 RUN mkdir -p ${LIVOX_WS}/src
 WORKDIR ${LIVOX_WS}/src
-RUN cp -r ${SANDO_WS}/src/sando/deps/livox_ros_driver2 livox_ros_driver2 && \
-    cd livox_ros_driver2 && \
-    rm -f COLCON_IGNORE && \
+RUN git clone https://github.com/Livox-SDK/livox_ros_driver2.git && \
+    cd livox_ros_driver2 && git checkout ${LIVOX_DRIVER_REF} && \
     cp -f package_ROS2.xml package.xml && \
-    cp -rf launch_ROS2/ launch/
+    sed -i 's|imu_msg.header.frame_id = "livox_frame";|imu_msg.header.frame_id.assign(frame_id_);|' src/lddc.cpp
 SHELL ["/bin/bash", "-c"]
 WORKDIR ${LIVOX_WS}
 RUN source /opt/ros/humble/setup.bash && \
     colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
-                              -DROS_EDITION=ROS2 -DHUMBLE_ROS=humble
+                              -DROS_EDITION=ROS2 -DDISTRO_ROS=humble
 
 # Build all colcon packages (three passes: decomp_util, main, ros2_livox_simulation)
 # Parallelism is limited to avoid OOM kills on template-heavy files like
